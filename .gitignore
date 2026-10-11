@@ -1,9 +1,17 @@
-# Secrets
+# Secrets and local configuration
 .env
 .env.*
 !.env.example
+worker/.env
+tgcloud/lib/config.js
+.tgcloud/
 *.pem
 *.key
+
+# Node.js
+node_modules/
+worker/node_modules/
+npm-debug.log*
 
 # Python
 __pycache__/
