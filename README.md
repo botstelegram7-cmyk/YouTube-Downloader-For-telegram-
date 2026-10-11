@@ -7,7 +7,7 @@ Production-oriented Python Telegram bot using **python-telegram-bot (PTB) 22.8**
 ## Features
 - PTB 22.8 async application with /start, /help, and /quality
 - YouTube video and Shorts links; selectable resolution from 360p to 2160p
-- Temporary download directories, timeout handling, upload-size checks, logs, and friendly errors
+- Temporary download directories, timeout handling, Telegram Bot API 50 MB upload-limit detection, logs, and friendly errors
 - HTTP health endpoint at /health for Render health checks
 - config.py, .env.example, Docker support, Render Blueprint, and deployment guide
 - Process environment variables override local .env values
@@ -66,7 +66,7 @@ Health check: http://YOUR_SERVER_IP:10000/health. Expose the port only if requir
 1. Open https://dashboard.render.com/ and choose **New → Web Service**.
 2. Connect this GitHub repository and select the `main` branch.
 3. Select Docker runtime so Render builds the included Dockerfile.
-4. Under **Environment**, add BOT_TOKEN (from BotFather), MAX_FILE_MB=48, DEFAULT_QUALITY=720p, DOWNLOAD_TIMEOUT=900, and LOG_LEVEL=INFO.
+4. Under **Environment**, add BOT_TOKEN (from BotFather), DEFAULT_QUALITY=720p, DOWNLOAD_TIMEOUT=900, and LOG_LEVEL=INFO.
 5. Deploy, inspect logs, and check `/health` on the service URL.
 
 Render injects environment variables into the running process; you do not need to upload a real .env file. After changing variables, save and redeploy. Official docs: https://render.com/docs/configure-environment-variables and https://render.com/docs/web-services.
@@ -104,7 +104,7 @@ This bot uses Telegram long polling, which requires a continuously running proce
 ## Troubleshooting
 - BOT_TOKEN missing: set BOT_TOKEN in the process environment or local .env.
 - FFmpeg missing: use the Dockerfile or install FFmpeg on your VPS.
-- File too large: use `/quality 480p` or reduce MAX_FILE_MB.
+- File too large: use `/quality 480p` or `/quality 360p`; the hosted Telegram Bot API limit is 50 MB per upload.
 - Video unavailable: check URL and access permissions; update yt-dlp after testing.
 - Bot stops after SSH disconnect: run it under systemd/Docker or use an always-on service.
 - Render health check fails: inspect logs and confirm the PORT is available.
