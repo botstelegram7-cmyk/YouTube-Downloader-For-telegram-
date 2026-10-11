@@ -3,10 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "deploy": "npm run check:tgcloud && tgcloud push",
+    "deploy": "npm test && npm run check:tgcloud && tgcloud push",
     "status": "tgcloud status",
     "diff": "tgcloud diff",
-    "check:tgcloud": "node scripts/check-tgcloud.mjs"
+    "check:tgcloud": "node scripts/check-tgcloud.mjs",
+    "test": "node --test"
   },
   "devDependencies": {
     "@tgcloud/cli": "^0.2.0"
