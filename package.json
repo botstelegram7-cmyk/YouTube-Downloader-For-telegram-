@@ -8,7 +8,7 @@
     "node": ">=22.15.0"
   },
   "scripts": {
-    "test": "node --import ./tests/stubs/register.mjs --test tests/",
+    "test": "node --import ./tests/stubs/register.mjs --test \"tests/*.test.mjs\"",
     "test:worker": "npm --prefix worker test",
     "test:all": "npm test && npm run test:worker",
     "check": "npm run check:modules && npm run check:syntax && npm run test:all",
