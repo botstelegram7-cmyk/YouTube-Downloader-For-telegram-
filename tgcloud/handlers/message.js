@@ -49,7 +49,7 @@ export default async function (message) {
   if (command === '/quality') {
     const quality = (args[0] || '').toLowerCase();
     if (!QUALITIES.has(quality)) {
-      await api.sendMessage({ chat_id: chatId, text: 'Usage: /quality 720p\\nOptions: ' + [...QUALITIES].join(', ') });
+      await api.sendMessage({ chat_id: chatId, text: 'Usage: /quality 720p\nOptions: ' + [...QUALITIES].join(', ') });
       return;
     }
     const userId = message.from?.id;
