@@ -89,6 +89,22 @@ The health endpoint should return JSON with `"ok":true`. For a hosted service, d
 
 TypeTube's public cluster has per-IP request quotas that may change. The worker uses yt-dlp only as a fallback if TypeTube fails. FFmpeg is included in the worker Docker image.
 
+### Option 2: Render Web Service (public HTTPS URL)
+
+1. Open https://dashboard.render.com/ and create **New → Web Service**.
+2. Connect this repository and choose the `main` branch.
+3. Set **Root Directory** to `worker`.
+4. Choose the **Docker** runtime. Render should use `worker/Dockerfile` as the Dockerfile in that root directory.
+5. Set these environment variables in the Render dashboard:
+   - `BOT_TOKEN` = your normal BotFather bot token
+   - `WORKER_SECRET` = the same long random secret generated for the local Serverless config
+   - `MAX_CONCURRENT_DOWNLOADS` = `2` (optional)
+6. Choose an always-on instance suitable for long downloads, then deploy.
+7. Open the service's HTTPS URL plus `/health`; it should return JSON with `"ok":true`.
+8. Put the service's base HTTPS URL into `tgcloud/lib/config.js` as `WORKER_URL`, with the same `WORKER_SECRET`.
+
+Do not set the repository root to `/` or leave the root directory blank for this worker deployment: the repository root Dockerfile is for the legacy Python bot. For the worker, use the `worker` root directory. Free services may sleep or stop long-running jobs, so use an always-on worker for reliable downloads.
+
 ## Part C — Enable Telegram Serverless
 
 1. Open Telegram and chat with **@BotFather**.
