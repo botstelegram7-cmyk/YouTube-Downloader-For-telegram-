@@ -1,15 +1,58 @@
+# Render Blueprint — deploys the download worker.
+#
+# The Telegram Serverless bot itself is NOT deployed here: it lives inside Telegram.
+# This file only describes the small Node worker that TypeTube downloads need.
+#
+# How to use it: Render Dashboard → New → Blueprint → pick this repository → Apply.
+# Render reads this file, builds worker/Dockerfile and asks you for the one secret it
+# cannot generate (BOT_TOKEN). See docs/DEPLOYMENT.md for the phone-friendly version.
+#
+# Free-plan notes (see docs/DEPLOYMENT.md → "Free plan reality check"):
+#   * free instances sleep after 15 minutes without traffic and need ~50 s to wake;
+#   * 512 MB RAM / 0.1 vCPU is enough for one job, hence MAX_CONCURRENT_DOWNLOADS=1;
+#   * 750 instance-hours per workspace per month ≈ one always-on service.
 services:
   - type: web
-    name: youtube-downloader-telegram
+    name: youtube-dl-worker
     runtime: docker
-    plan: starter
+    plan: free
+    # Singapore is deliberate: the TypeTube cluster is in Singapore, so downloads and
+    # region-restricted tracks behave best when the worker sits next to it.
+    region: singapore
+    rootDir: worker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /health
+    autoDeploy: true
     envVars:
+      # Your BotFather bot token. Marked as a secret, so Render asks for it once and
+      # stores it encrypted instead of keeping it in this file.
       - key: BOT_TOKEN
         sync: false
-      - key: DEFAULT_QUALITY
-        value: 720p
-      - key: DOWNLOAD_TIMEOUT
+      # Render generates the shared secret for you — copy it from the dashboard into
+      # the bot with /setup <url> <secret>.
+      - key: WORKER_SECRET
+        generateValue: true
+
+      # Tuned for a 512 MB free instance.
+      - key: MAX_CONCURRENT_DOWNLOADS
+        value: "1"
+      - key: DOWNLOAD_WORKERS
+        value: "4"
+      - key: CHUNK_SIZE_MB
+        value: "8"
+      - key: JOB_TIMEOUT_SECONDS
         value: "900"
+
+      # Hosted Bot API upload cap.
+      - key: MAX_UPLOAD_MB
+        value: "50"
+      - key: AUTO_DOWNGRADE
+        value: "true"
+
+      # TypeTube first, yt-dlp only when TypeTube cannot deliver.
+      - key: YTDLP_FALLBACK
+        value: "true"
+
       - key: LOG_LEVEL
-        value: INFO
+        value: info
