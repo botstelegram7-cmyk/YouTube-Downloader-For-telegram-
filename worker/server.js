@@ -6,10 +6,10 @@ import { promises as fsp } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
 import axios from 'axios';
 import FormData from 'form-data';
-import { TypeTube, createClient } from 'typetube';
+import { createClient } from 'typetube';
 
 const execFileAsync = promisify(execFile);
 const PORT = Number(process.env.PORT || 8080);
