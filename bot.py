@@ -77,12 +77,14 @@ async def download_video(url: str, quality: str, output_dir: Path) -> Path:
                                                 stderr=asyncio.subprocess.STDOUT)
     try:
         output, _ = await asyncio.wait_for(proc.communicate(), timeout=DOWNLOAD_TIMEOUT)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
+    except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        if isinstance(_, asyncio.CancelledError):
-            raise
         raise RuntimeError(f"Download timed out after {DOWNLOAD_TIMEOUT} seconds.") from None
+    except asyncio.CancelledError:
+        proc.kill()
+        await proc.wait()
+        raise
     if proc.returncode != 0:
         log.warning("yt-dlp exited %s: %s", proc.returncode, output.decode(errors="replace")[-1500:])
         raise RuntimeError("Download failed. The video may be unavailable, restricted, too large, or yt-dlp may need updating.")
