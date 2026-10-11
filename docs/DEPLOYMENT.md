@@ -1,8 +1,8 @@
-# Deployment guide — Telegram Serverless bot + Render worker, entirely from Termux
+# Deployment guide — Telegram Serverless bot + a download worker (Render or Voroa), entirely from Termux
 
 This is the complete, phone-only walkthrough. Everything below runs in **Termux on
-Android** plus two phone-friendly web dashboards (@BotFather inside Telegram and
-render.com). No PC, no VPS, no SSH key required.
+Android** plus phone-friendly web dashboards (@BotFather inside Telegram, and either
+render.com or getvoroa.com for the worker). No PC, no VPS, no SSH key required.
 
 Read it once before starting; it takes about 30 minutes the first time.
 
@@ -11,7 +11,7 @@ Read it once before starting; it takes about 30 minutes the first time.
 | Piece | Where it runs | What it does |
 |---|---|---|
 | Bot handlers + database | **Telegram Serverless** (Telegram's own cloud) | /start, /help, /quality, buttons, quotas, config |
-| Download worker | **Render** (free Docker web service) | Resolves and downloads with **TypeTube**, merges with FFmpeg, uploads to Telegram |
+| Download worker | **Render** or **Voroa** (free Docker web service) | Resolves and downloads with **TypeTube**, merges with FFmpeg, uploads to Telegram |
 | Fallback engine | inside the worker | yt-dlp, used only when TypeTube cannot deliver |
 
 ---
@@ -21,7 +21,7 @@ Read it once before starting; it takes about 30 minutes the first time.
 1. [Step 0 — Termux setup](#step-0--termux-setup)
 2. [Step 1 — Create the bot and enable Serverless](#step-1--create-the-bot-and-enable-serverless)
 3. [Step 2 — Get the code onto the phone](#step-2--get-the-code-onto-the-phone)
-4. [Step 3 — Deploy the worker on Render](#step-3--deploy-the-worker-on-render)
+4. [Step 3 — Deploy the worker (Render or Voroa)](#step-3--deploy-the-worker-render-or-voroa)
 5. [Step 4 — Test the worker](#step-4--test-the-worker)
 6. [Step 5 — Connect the bot to the worker](#step-5--connect-the-bot-to-the-worker)
 7. [Step 6 — Deploy the bot to Telegram Serverless](#step-6--deploy-the-bot-to-telegram-serverless)
@@ -125,10 +125,16 @@ failures. This also validates the deployable layout *before* it reaches Telegram
 
 ---
 
-## Step 3 — Deploy the worker on Render
+## Step 3 — Deploy the worker (Render or Voroa)
 
 The worker is a small always-needed Docker service. The repository ships
 [`render.yaml`](../render.yaml), so the fastest path is a **Blueprint**.
+
+Pick **one** host in this step: Render (Singapore, Step 3a–3c) or Voroa (Mumbai, India,
+Step 3d). The worker and every environment variable are identical on both.
+
+**Option A — Render (Singapore):** follow 3a–3c. **Option B — Voroa (Mumbai, India):**
+skip to [3d](#3d-on-voroa-mumbai-india). The environment variables are the same on both.
 
 ### 3a. Create the service
 
@@ -162,11 +168,26 @@ The worker is a small always-needed Docker service. The repository ships
    | `MAX_CONCURRENT_DOWNLOADS` | `1` |
    | `DOWNLOAD_WORKERS` | `4` |
    | `CHUNK_SIZE_MB` | `8` |
-   | `MAX_UPLOAD_MB` | `50` |
+   | `MAX_UPLOAD_MB` | `0` (no worker-side limit) |
    | `YTDLP_FALLBACK` | `true` |
    | `LOG_LEVEL` | `info` |
 
 8. **Create Web Service**.
+
+**About the size limit.** `MAX_UPLOAD_MB=0` means the worker never refuses or downgrades
+a file by size: it downloads the quality you asked for and hands it to Telegram. The
+ceiling that still exists is Telegram's own — the hosted Bot API rejects bot uploads
+above **50 MB**, which no setting on the worker can change. So on the hosted API, a big
+video now fails during upload with a message that offers the smaller qualities, instead
+of being silently re-downloaded smaller.
+
+If you want large files to actually arrive, you need a **self-hosted bot API server**:
+get `api_id`/`api_hash` from <https://my.telegram.org>, run the
+[telegram-bot-api](https://github.com/tdlib/telegram-bot-api) server next to the worker,
+then set `TELEGRAM_API_BASE=http://<host>:8081` and raise `MAX_UPLOAD_MB` to `2000`. That
+server needs roughly 1 GB of RAM, so it does not fit on a free 512 MB instance — run it
+on a VPS or a paid 1 GB+ service. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the
+symptom-by-symptom view.
 
 </details>
 
@@ -185,6 +206,86 @@ Write both down; Step 5 needs them.
 The deploy log ends with `Worker listening`. If the service shows **Deploy failed**,
 open the log and search for the first `error` line — the worker prints a readable list
 of any configuration problem.
+
+---
+
+### 3d. On Voroa (Mumbai, India)
+
+[Voroa](https://getvoroa.com) is an Indian PaaS that builds straight from GitHub and runs
+in **Mumbai**, billed in rupees. Same worker, same variables — only the dashboard differs.
+
+| | Render free | Voroa free (Nano) |
+|---|---|---|
+| Region | Singapore (nearest to the TypeTube cluster) | Mumbai, India |
+| Memory / CPU | 512 MB / 0.1 vCPU | 512 MB / 0.1 vCPU |
+| Sleeps after | 15 min idle | 15 min idle |
+| Monthly budget | 750 instance-hours per workspace | 750 running hours per workspace, shared by all free services (web services, workers and cron jobs) |
+| Filesystem | ephemeral | ephemeral (nothing persists across deploys) |
+| Card needed | yes | no |
+
+#### Choose the runtime: Docker (recommended)
+
+| Runtime | FFmpeg + yt-dlp | Result |
+|---|---|---|
+| **Docker (Dockerfile)** | installed by the image | ✅ muxed video with sound, audio → M4A |
+| **Node.js** buildpack | not installed | ⚠️ video track only (silent), no audio conversion |
+
+Voroa's Node runtime cannot install system packages, so a buildpack service has no FFmpeg
+and no yt-dlp. The worker still runs and downloads — but it can only hand over the video
+track, because merging audio needs FFmpeg. That is why the repository now ships a
+**`Dockerfile` at the root**, which is exactly where Voroa looks by default.
+
+#### 3d-i. Docker runtime (recommended)
+
+1. Dashboard → **New** → **Web Service**.
+2. Connect GitHub and pick this repository, branch **`main`**.
+3. Under **Build & runtime**, set **Runtime** to **Docker (Dockerfile)**.
+4. Leave **Dockerfile path** as `/Dockerfile` — the file is at the repository root.
+   (It is set when the service is created and cannot be changed later.)
+5. Size: **Nano** (free, 512 MB).
+6. Add the same environment variables as in 3a step 7 — everything except `PORT`, which
+   Voroa sets for you (it is always `3000`, and the worker reads it from the environment).
+7. **Create**. Watch the build in **Deploys**.
+
+The image declares a `HEALTHCHECK` on `/health`, and Voroa uses it to decide whether a
+new deploy is ready — so a build that starts but cannot serve fails the deploy instead of
+going live broken.
+
+#### 3d-ii. Node.js buildpack (no Docker)
+
+Use this only if you cannot use Docker. In the service, open **Settings → Build &
+runtime** and set:
+
+* **Build command**: `npm run build` — installs the worker's production dependencies.
+* **Start command**: `npm start` — runs `worker/src/index.js`.
+
+The build command *replaces* Voroa's automatic build, which is why it is the install
+step. Leave the root directory at the repository root: `npm start` and `npm run build`
+are defined there for exactly this case.
+
+::: warning No FFmpeg on this path
+Without the Docker image there is no FFmpeg and no yt-dlp: videos arrive **without
+audio**. Use Docker if you want normal video downloads.
+:::
+
+#### 3d-iii. Node version — do not skip this
+
+Voroa keeps a new service on the Node version it was created with (**Node 20** by
+default), and **TypeTube cannot run on Node 20**: it needs zlib zstd from Node 22.15+.
+The repository declares **Node 24** in `.node-version` at the root, which Voroa reads on
+every deploy, so a buildpack service picks the right version automatically. If you ever
+see `typeTube.supported: false` in `/health`, the running Node is too old.
+
+#### 3d-iv. The URL and the secret
+
+Same as 3b: the service page shows the HTTPS URL (Voroa gives you something like
+`https://<service>.getvoroa.com`) and the **Environment** section reveals `WORKER_SECRET`.
+Copy both — Step 5 needs them.
+
+> **Voroa needs no webhook URL and no webhook secret for this service.** The worker is a
+> private API: your Telegram Serverless bot calls it. The Telegram webhook belongs to the
+> bot and is registered by `npx tgcloud webhook` in Step 6. If a dashboard offers you an
+> auto-deploy webhook for GitHub, that is optional and unrelated to Telegram.
 
 ---
 
@@ -334,8 +435,8 @@ Now try the normal flow — just sending a link — and the buttons:
 
 ## Step 8 — Keep the free worker awake
 
-Free Render services sleep after **15 minutes** with no incoming request, and waking up
-takes ~50 seconds. A cron ping every 10 minutes keeps it warm.
+Free instances sleep after **15 minutes** with no incoming request on both hosts — Render
+and Voroa — and waking up takes up to a minute. A cron ping every 10 minutes keeps it warm.
 
 1. Create a free account at <https://cron-job.org> (or use UptimeRobot).
 2. **Create cronjob**:
@@ -344,9 +445,11 @@ takes ~50 seconds. A cron ping every 10 minutes keeps it warm.
    * Enable **failure notifications** so you learn when the worker dies.
 3. Save. The worker now answers instantly.
 
-Budget check: 24/7 awake ≈ **744 instance-hours/month**, and the free plan allows 750
-per workspace. Since this is your only Render service, you stay inside the limit — but
-do not add a second free service in the same workspace.
+Budget check: 24/7 awake ≈ **744 instance-hours/month**, and both free plans allow 750
+per workspace. Since this is your only worker, you stay inside the limit — but do not add
+a second free service in the same workspace. On Voroa the 750 hours are shared by every
+free service (web services, background workers, cron jobs); if the workspace runs out,
+its free services stop until the month resets and start again by themselves.
 
 ---
 
@@ -365,20 +468,23 @@ npx tgcloud migrate
 
 ### Update the worker
 
-Push to the branch Render builds, or tap **Manual Deploy → Deploy latest commit** in
-the Render dashboard. The worker must restart for a new image, so a deploy briefly
+Push to the branch your host builds, or use **Manual Deploy → Deploy latest commit**
+(Render) / **Deploy latest commit** (Voroa). The worker must restart for a new image, so a deploy briefly
 interrupts downloads (in-flight jobs are cancelled cleanly and their status message
 says so).
 
 ### Watch logs
 
-* Worker: Render dashboard → your service → **Logs** (one JSON object per line).
+* Worker: Render dashboard → your service → **Logs**, or Voroa → your service →
+  **Deploys** / live logs (one JSON object per line either way).
 * Bot: `npx tgcloud run handlers/message '{ ... }'` prints handler `console` output.
 
 ### Change a limit
 
-Edit the environment variables in the Render dashboard (worker side) or
-`tgcloud/lib/config.js` and re-push (bot side, e.g. `MAX_JOBS_PER_DAY`).
+Edit the environment variables in your host's dashboard (worker side), or
+`tgcloud/lib/config.js` and re-push (bot side, e.g. `MAX_JOBS_PER_DAY`). The worker
+variables worth knowing: `MAX_UPLOAD_MB` (`0` = no worker-side limit), `MAX_CONCURRENT_DOWNLOADS`,
+`DOWNLOAD_WORKERS`, `CHUNK_SIZE_MB` and `STATUS_UPDATE_SECONDS`.
 
 ### Rotate the worker secret
 
@@ -386,7 +492,8 @@ Edit the environment variables in the Render dashboard (worker side) or
 openssl rand -hex 32
 ```
 
-1. Render dashboard → Environment → set the new `WORKER_SECRET` → save (it redeploys).
+1. Your host's dashboard → Environment → set the new `WORKER_SECRET` → save (it
+   redeploys).
 2. In Telegram: `/setup https://your-worker.onrender.com <new secret>`.
 
 ---
@@ -403,6 +510,12 @@ openssl rand -hex 32
 | Build minutes | 500 / month | A worker image build is a few minutes |
 | PostgreSQL | deleted after 90 days | Not used — the bot's database lives inside Telegram |
 
+**Voroa free (Nano)** is the same 512 MB / 0.1 vCPU / 15-minute-sleep shape, in Mumbai,
+plus: no card to start, an INR bill with GST, 750 running hours per month shared by every
+free service in the workspace, up to 4 services, 5 GB of bandwidth and 500 build minutes
+per month, and **no persistent filesystem** (nothing survives a deploy — the worker only
+uses the temp directory, so this does not matter here).
+
 **What sleeps are not:** if you skip Step 8, the first link after a quiet period can
 fail with "the worker did not answer in time". The bot tells you exactly that, and
 re-sending the link a minute later works. This is expected behaviour, not a bug.
@@ -417,7 +530,9 @@ re-sending the link a minute later works. This is expected behaviour, not a bug.
 | "The worker rejected the shared secret" | Typo, or the secret changed in Render | Copy `WORKER_SECRET` from the Render Environment tab and run `/setup` again |
 | "The worker did not answer in time" | Free instance asleep, or a bad URL | Check `curl $WORKER_URL/health`; set up Step 8 |
 | `curl` shows `typeTube.supported: false` | Old Node in the image | Redeploy from this repository (it pins Node 24) |
-| "file is too large / above Telegram's 50 MB limit" | Video bigger than the bot API allows | Use the **Retry 480p/360p** buttons, or `/quality 360p` |
+| "file is too large / above Telegram's 50 MB limit" | Video bigger than the **hosted Bot API** allows (this is Telegram's limit, not the worker's) | Use the **Retry 480p/360p** buttons, `/quality 360p`, or run a self-hosted bot API server with `TELEGRAM_API_BASE` to lift the ceiling to 2 GB |
+| Voroa build fails with "no start script" / deploy stuck | The root buildpack path needs the root scripts | Use the **Docker (Dockerfile)** runtime (`/Dockerfile`), or set build `npm run build` and start `npm start` (step 3d) |
+| Voroa service builds but downloads have **no sound** | Buildpack runtime — no FFmpeg in the image | Switch the service to the **Docker (Dockerfile)** runtime |
 | "YouTube refused the download for the worker's region (403)" | Region-restricted track (common for VEVO/music) | Host the worker in Singapore, or try another video |
 | Downloads work but slowly | 0.1 vCPU free instance | Upgrade to Starter ($7/mo) for a dedicated 0.5 vCPU |
 | `npx tgcloud push` says the module names are invalid | A file under `tgcloud/` has a non-identifier name | `npm run check:modules` names the offending file |
@@ -448,7 +563,7 @@ npx tgcloud migrate                  # apply schema changes
 npx tgcloud webhook                  # inspect the managed webhook
 npx tgcloud run handlers/message '{ chat: { id: 1, type: "private" }, from: { id: 1 }, text: "/start" }'
 
-# --- Worker (Render) --------------------------------------------------------
+# --- Worker (Render or Voroa) -----------------------------------------------
 curl -s "$WORKER_URL/health" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.stringify(JSON.parse(s),null,2)))"
 curl -s -H "Authorization: Bearer $WORKER_SECRET" "$WORKER_URL/stats"
 

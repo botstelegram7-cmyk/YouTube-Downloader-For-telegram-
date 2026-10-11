@@ -2,16 +2,17 @@
 
 A production-shaped Telegram bot that downloads YouTube videos and Shorts and delivers
 them straight into your chat. The bot itself runs on **Telegram Serverless** — there is
-no server for it — while a small **Render worker** does the downloading with
-[**TypeTube**](https://github.com/botstelegram7-cmyk/typetube), falling back to yt-dlp
-only when TypeTube cannot deliver a file.
+no server for it — while a small **download worker** on
+[Render](https://render.com) (Singapore) or [Voroa](https://getvoroa.com) (Mumbai) does
+the downloading with [**TypeTube**](https://github.com/botstelegram7-cmyk/typetube),
+falling back to yt-dlp only when TypeTube cannot deliver a file.
 
 ```
 Telegram  ──update──▶  Serverless handler (tgcloud/)
                           │  validates the link, stores preferences,
                           │  submits an authenticated job
                           ▼
-                       Render worker (worker/)
+                       Download worker (worker/) — Render or Voroa
                           │  TypeTube: resolve → parallel range download → mux
                           │  fallback: yt-dlp
                           ▼
@@ -50,7 +51,7 @@ guide that runs entirely from Termux on an Android phone.
 |---|---|
 | Telegram bot | Created in [@BotFather](https://t.me/BotFather) with **Serverless enabled** |
 | Node.js (for the CLI) | 18 or newer locally; the worker image pins **Node 24** |
-| Worker host | Render (a free instance is enough for personal use) — see [the free plan notes](docs/DEPLOYMENT.md#free-plan-reality-check) |
+| Worker host | Render (Singapore) or Voroa (Mumbai, India) — a free 512 MB instance is enough for personal use; see [the free plan notes](docs/DEPLOYMENT.md#free-plan-reality-check) and [the Voroa steps](docs/DEPLOYMENT.md#3d-on-voroa-mumbai-india) |
 | Node.js (for TypeTube) | **22.15+ / 24** — TypeTube needs zlib zstd; see [TYPETUBE_COMPAT.md](docs/TYPETUBE_COMPAT.md) |
 
 ## Quick start
@@ -64,8 +65,10 @@ npx tgcloud push
 npx tgcloud migrate
 npx tgcloud webhook
 
-# 2. Worker → Render
-#    Dashboard → New → Blueprint → pick this repository (render.yaml configures it)
+# 2. Worker → Render or Voroa
+#    Render: Dashboard → New → Blueprint → pick this repository (render.yaml configures it)
+#    Voroa:  New → Web Service → Runtime "Docker (Dockerfile)" → Dockerfile path /Dockerfile
+#            (full runbook: docs/DEPLOYMENT.md → Step 3d)
 
 # 3. Connect them, in Telegram
 /setup https://your-worker.onrender.com YOUR_WORKER_SECRET
@@ -85,7 +88,7 @@ Full walkthrough with screenshots-in-words: **[docs/DEPLOYMENT.md](docs/DEPLOYME
 | `/status` | Worker health and your running job |
 | `/cancel` | Stop your running download |
 | `/about` | Credits, limits and sources |
-| `/setup <url> <secret>` | **Owner** — connect the Render worker |
+| `/setup <url> <secret>` | **Owner** — connect the worker |
 | `/config` | **Owner** — show the current configuration |
 | `/stats` | **Owner** — worker queue, memory, TypeTube status |
 | `/unset` | **Owner** — forget the worker credentials |
@@ -105,11 +108,11 @@ tgcloud/                  Deployed to Telegram (the only folder that is)
 │  ├─ youtube.js          URL/command logic, shared with the worker via test fixtures
 │  ├─ messages.js         Every user-facing string
 │  ├─ storage.js          Database access (settings, preferences, jobs)
-│  ├─ worker_api.js       Authenticated client for the Render worker
+│  ├─ worker_api.js       Authenticated client for the worker
 │  └─ download_flow.js    The single path every download takes
 └─ schema.js              user_preferences, bot_settings, download_jobs
 
-worker/                   Deployed to Render
+worker/                   Deployed to Render or Voroa
 ├─ src/
 │  ├─ index.js            Boot, health endpoint, graceful shutdown
 │  ├─ server.js           HTTP surface: /download, /jobs/:id/cancel, /health, /stats
@@ -123,7 +126,11 @@ worker/                   Deployed to Render
 │  ├─ thumbnail.js        Preview thumbnails for sendVideo
 │  └─ validate.js         Shared URL/quality rules (mirrors tgcloud/lib/youtube.js)
 ├─ test/                  Unit tests (node:test)
-└─ Dockerfile             Node 24 + FFmpeg + yt-dlp
+└─ Dockerfile             Node 24 + FFmpeg + yt-dlp (subdirectory build)
+
+Dockerfile                Same image built from the repository root, for hosts that
+                          build the root and look for /Dockerfile (e.g. Voroa)
+.node-version             Pins Node 24 so buildpack hosts do not fall back to Node 20
 
 tests/                    Tests for the Serverless side
 ├─ handlers.test.mjs      Real handlers against a stub SDK

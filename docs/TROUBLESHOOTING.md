@@ -137,10 +137,44 @@ differently again.
 
 | Cause | Check |
 |---|---|
-| File above the 50 MB bot limit | The status message becomes the downgrade explanation with retry buttons |
+| File above the 50 MB bot limit | Telegram's limit, not the worker's (`MAX_UPLOAD_MB=0` by default). The status message explains it and offers retry qualities; a self-hosted bot API server lifts the ceiling to 2 GB |
 | Telegram rejected the codec | The worker falls back to `sendDocument`; look for `Upload attempt failed, trying a simpler form` in the logs |
 | Upload timed out | Slow phone connection or a stalled request; re-try, and prefer a lower quality |
 | Bot token revoked or rotated | `getMe` in the worker log at boot says so explicitly |
+
+### "File is too large" even though MAX_UPLOAD_MB is 0
+
+`MAX_UPLOAD_MB=0` removes the **worker's** limit only. The hosted Bot API rejects bot
+uploads above **50 MB** before the file ever reaches the chat, and it is Telegram doing
+the rejecting:
+
+| What you see | What it means |
+|---|---|
+| `sendVideo`/`sendDocument` fails with `Bad Request: file is too big` | Telegram refused it — the worker logged the exact method |
+| `/health` shows `"maxUploadMb": "unlimited"` | The worker really is unlimited; the limit is upstream |
+| `/config` (owner) shows `telegramApi: hosted` | The hosted Bot API is in use, so 50 MB applies |
+
+Three honest options:
+
+1. **Accept 50 MB and let the worker downgrade** — set `MAX_UPLOAD_MB=50` and
+   `AUTO_DOWNGRADE=true`, and the bot re-downloads smaller instead of failing (the retry
+   buttons do it by hand).
+2. **Ask for a smaller quality up front** — 360p/480p are usually inside 50 MB.
+3. **Self-host the bot API server** — run
+   [telegram-bot-api](https://github.com/tdlib/telegram-bot-api) with an `api_id`/`api_hash`
+   from <https://my.telegram.org>, set `TELEGRAM_API_BASE=http://<host>:8081` and
+   `MAX_UPLOAD_MB=2000`. Uploads then reach 2 GB per file. Budget ~1 GB of RAM for that
+   server, so a free 512 MB instance cannot host both.
+
+### The worker deployed but downloads arrive without sound
+
+The worker could not find FFmpeg, so it delivered the video track on its own:
+
+| Host / runtime | Why | Fix |
+|---|---|---|
+| Voroa, **Node.js buildpack** | The buildpack cannot install system packages, so there is no FFmpeg (and no yt-dlp) | Switch the service to the **Docker (Dockerfile)** runtime — the image installs both |
+| Render, Docker | The image should have FFmpeg | Check `/health` → `"ffmpeg": "…"`; if it says `missing`, redeploy from this repository |
+| Any host, `FFMPEG_BINARY` set | The path does not exist in the container | Unset it, or point it at a real binary |
 
 ### The container is killed at random
 

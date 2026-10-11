@@ -4,6 +4,36 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic
 versioning for the worker's HTTP contract.
 
+## [2.0.1] — 2026-10-12
+
+Two things asked for after the first real deployment: no size limit of our own, and a
+worker that deploys cleanly on hosts that build the repository root.
+
+### Changed
+
+* **The worker no longer caps upload size.** `MAX_UPLOAD_MB` now defaults to **`0` —
+  unlimited**: the file is downloaded at the quality that was requested and handed to
+  Telegram, instead of being silently re-downloaded smaller. Set it to a number to bring
+  the automatic downgrade back (`AUTO_DOWNGRADE=true`).
+* The startup warning, `/health` (`"maxUploadMb": "unlimited"`) and the user-facing
+  message now explain **Telegram's own ceiling** instead of ours: 50 MB on the hosted Bot
+  API, 2 GB with a self-hosted bot API server via `TELEGRAM_API_BASE`.
+* Test and lint globs are shell-expanded (`node --test test/*.test.js`) so they work on
+  Node 20 and Node 24 alike.
+
+### Added
+
+* **Root `Dockerfile`** and `.dockerignore` — the same image as `worker/Dockerfile`, built
+  from the repository root for hosts that only look for `/Dockerfile`.
+* **Root `start` and `build` scripts** (`node worker/src/index.js`, install the worker's
+  production dependencies) so a buildpack host can deploy without a root-directory
+  setting.
+* **`.node-version`** pinning Node 24: buildpack hosts keep new services on Node 20
+  otherwise, where TypeTube cannot run.
+* **Voroa deployment runbook** (Mumbai, India) in `docs/DEPLOYMENT.md`, with the Docker
+  and buildpack paths, the free-plan limits, and the cause of silent (no-FFmpeg) video.
+* Troubleshooting entries for the size ceiling and for video arriving without sound.
+
 ## [2.0.0] — 2026-10-12
 
 A ground-up rewrite around one architecture: **Telegram Serverless for the bot, a Render
