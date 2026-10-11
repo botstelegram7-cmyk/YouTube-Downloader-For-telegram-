@@ -49,15 +49,21 @@ export default async function (message) {
   if (command === '/quality') {
     const quality = (args[0] || '').toLowerCase();
     if (!QUALITIES.has(quality)) {
-      await api.sendMessage({ chat_id: chatId, text: 'Usage: /quality 720p\nOptions: ' + [...QUALITIES].join(', ') });
+      await api.sendMessage({ chat_id: chatId, text: 'Usage: /quality 720p\\nOptions: ' + [...QUALITIES].join(', ') });
       return;
     }
-    // Telegram Serverless invocations are isolated; do not pretend this in-memory
-    // setting persists. Pass quality in the next URL using /quality <quality> first
-    // only after the durable preference table is enabled.
+    const userId = message.from?.id;
+    if (!userId) {
+      await api.sendMessage({ chat_id: chatId, text: 'I could not identify your Telegram user ID.' });
+      return;
+    }
+    await db.insert(userPreferences)
+      .values({ userId, quality })
+      .onConflictDoUpdate({ target: userPreferences.userId, set: { quality } })
+      .run();
     await api.sendMessage({
       chat_id: chatId,
-      text: `Quality selection ${quality} is recognized. Send the video URL with /download ${quality} <YouTube URL> to apply it to that download.`
+      text: `Default quality saved as ${quality}. Send a YouTube URL to use it, or use /download <quality> <URL> for a one-off choice.`
     });
     return;
   }
