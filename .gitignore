@@ -1,25 +1,36 @@
-# Secrets and local configuration
+# Telegram Serverless CLI state — holds the CLI access token, never commit it
+.tgcloud/
+
+# Secrets
 .env
 .env.*
 !.env.example
 worker/.env
-.tgcloud/
 *.pem
 *.key
+credentials.json
 
-# Node.js
+# Dependencies
 node_modules/
 worker/node_modules/
 npm-debug.log*
+npm-debug.log*
 
-# Python
+# Downloaded media and runtime leftovers
+downloads/
+worker/downloads/
+*.part
+*.tmp
+*.log
+
+# Python leftovers from the removed polling bot (kept out to avoid re-adding them)
 __pycache__/
 *.py[cod]
 .venv/
 venv/
 
-# Runtime files
-downloads/
-*.log
-*.tmp
+# Editors and OS
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/

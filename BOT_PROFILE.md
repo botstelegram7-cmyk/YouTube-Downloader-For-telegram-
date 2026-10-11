@@ -1,39 +1,57 @@
-# Telegram bot profile
+# Bot profile copy
 
-Telegram does not provide a separate public "tags" field for ordinary bots. Put relevant search keywords in the bot's description/about text, and set the command menu with @BotFather.
+Telegram has no separate keywords field for ordinary bots, so put the useful words in the
+description and about text. These are set in @BotFather — a file in a repository cannot
+change your live bot.
 
-## Suggested description
+## In @BotFather
 
-Download YouTube videos and Shorts in selectable quality. TypeTube-powered downloads with automatic yt-dlp fallback and delivery in Telegram. Choose 360p–2160p. Use only for content you own or are authorized to save.
+```text
+/setname        → YouTube Downloader
 
-## Suggested short about text
+/setdescription → Download YouTube videos and Shorts straight into Telegram. Choose a
+                  quality from 360p to 2160p, or grab the audio track only. Powered by
+                  TypeTube, with an automatic fallback so a link almost always works.
+                  Use it only for content you own or are allowed to save.
 
-🎬 YouTube video & Shorts downloader | Selectable quality | TypeTube + fallback
+/setabouttext   → 🎬 YouTube video & Shorts downloader · 360p–2160p · TypeTube powered
 
-## Keywords / tags to include naturally
+/setuserpic     → a simple camera/download icon you have the rights to use
+```
 
-YouTube downloader, video downloader, Shorts downloader, Telegram bot, TypeTube, 360p, 480p, 720p, 1080p, 1440p, 2160p.
+## Command menu
 
-## Set these in @BotFather
-
-1. Open @BotFather and select your bot.
-2. Use `/setdescription` and paste the suggested description.
-3. Use `/setabouttext` and paste the short about text.
-4. Use `/setcommands` and paste:
+Paste this into `/setcommands`:
 
 ```text
 start - Start the downloader
-help - Show help and usage
-quality - Set your default download quality
-download - Download a YouTube URL at a chosen quality
+help - How to use the bot
+quality - Choose the default resolution
+audio - Audio-only (M4A) mode
+video - Video with sound (default)
+download - One-off download at a chosen quality
+status - Worker health and your running job
+cancel - Stop your running download
+about - Credits, limits and the legal note
 ```
 
-These profile fields are set through @BotFather; committing this file documents the suggested text but does not automatically change the live Telegram profile.
+Owner commands (`/setup`, `/config`, `/stats`, `/unset`) are deliberately not in the
+menu, so ordinary users never see them — the bot still answers them with "only available
+to the bot owner".
 
-## Important: credentials are different
+## Keywords to include naturally
 
-- **Serverless CLI access token** (`app<id>:<secret>`): use only with `npx tgcloud login`.
-- **BotFather bot token**: required by the separate worker's Bot API status-message calls and upload workflow. Do not paste the CLI access token into `BOT_TOKEN`.
-- **API ID / API hash**: MTProto application credentials from `my.telegram.org`; they do not replace either token and do not automatically increase Telegram Serverless/Bot API upload limits.
+YouTube downloader, video downloader, Shorts downloader, Telegram bot, TypeTube,
+360p, 480p, 720p, 1080p, 1440p, 2160p, audio only, M4A.
 
-The current worker uses the hosted Bot API for file uploads, so the 50 MB per-file limit still applies. Supporting larger uploads requires a deliberate change to the upload transport and must be tested separately from Telegram Serverless. See the official Bot API limits: https://core.telegram.org/bots/faq#how-do-i-download-files and https://core.telegram.org/bots/api#sendvideo
+Do not keyword-stuff: Telegram's directories and users both dislike it.
+
+## Which token is which
+
+* **Bot token** (`123456789:AA…`) — from BotFather. The **worker** needs it to upload
+  files and edit status messages. Never give it to a third party.
+* **Serverless CLI access token** (`app<id>:<secret>`) — from
+  BotFather → your bot → **Serverless → CLI Access**. Only used by `npx tgcloud login`.
+  Never put it in `BOT_TOKEN`.
+* **API ID / API hash** — MTProto application credentials from my.telegram.org. This bot
+  does not use them, and they do not raise the Bot API's 50 MB upload limit.

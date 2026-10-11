@@ -1,35 +1,105 @@
-name: Repository checks
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  checks:
+  serverless:
+    name: Serverless modules and tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Compile legacy Python files
-        run: python -m compileall -q bot.py config.py
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
-      - name: Install Node dependencies
-        run: npm ci
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Validate the Serverless project layout
+        run: npm run check:modules
+
+      - name: Syntax check the deployable modules
+        run: npm run check:syntax
+
+      - name: Run handler, URL and worker-client tests
+        run: npm test
+
+  worker:
+    name: Download worker
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Syntax and hygiene checks
+        run: npm run lint
+
       - name: Run unit tests
         run: npm test
-      - name: Validate Telegram Serverless module layout
-        run: npm run check:tgcloud
-      - name: Check JavaScript syntax
-        run: node --check worker/server.js && node --check tgcloud/handlers/message.js && node --check tgcloud/lib/config.js && node --check tgcloud/lib/youtube.js
-      - name: Check whitespace
-        run: git diff --check
+
+      - name: Verify the container image builds
+        run: docker build -t worker-test .
+
+      - name: Smoke-test the container (config validation, health endpoint)
+        run: |
+          docker run --rm -d --name worker-ci -p 8080:8080 \
+            -e BOT_TOKEN=123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+            -e WORKER_SECRET=ci-only-secret-value-0123456789abcdef \
+            -e LOG_PRETTY=true \
+            worker-test
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health > /tmp/health.json; then break; fi
+            sleep 2
+          done
+          cat /tmp/health.json
+          grep -q '"ok":true' /tmp/health.json
+          curl -fsS http://127.0.0.1:8080/health | grep -q 'typeTube'
+          docker stop worker-ci
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail on whitespace errors
+        run: git diff --check HEAD~1 HEAD || git diff --check
+
+      - name: Fail if a secret-looking file is tracked
+        run: |
+          if git ls-files | grep -E '\.(env|pem|key)$|credentials$'; then
+            echo "::error::A secret-looking file is tracked in git"
+            exit 1
+          fi
+
+      - name: Fail if .tgcloud state is tracked
+        run: |
+          if git ls-files | grep -q '^\.tgcloud/'; then
+            echo "::error::.tgcloud/ holds the CLI access token and must never be committed"
+            exit 1
+          fi

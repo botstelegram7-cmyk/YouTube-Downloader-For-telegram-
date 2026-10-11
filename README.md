@@ -1,45 +1,185 @@
 # YouTube Downloader for Telegram
 
-Telegram Serverless bot handlers plus a separate TypeTube download worker.
+A production-shaped Telegram bot that downloads YouTube videos and Shorts and delivers
+them straight into your chat. The bot itself runs on **Telegram Serverless** — there is
+no server for it — while a small **Render worker** does the downloading with
+[**TypeTube**](https://github.com/botstelegram7-cmyk/typetube), falling back to yt-dlp
+only when TypeTube cannot deliver a file.
 
-## Recommended deployment
+```
+Telegram  ──update──▶  Serverless handler (tgcloud/)
+                          │  validates the link, stores preferences,
+                          │  submits an authenticated job
+                          ▼
+                       Render worker (worker/)
+                          │  TypeTube: resolve → parallel range download → mux
+                          │  fallback: yt-dlp
+                          ▼
+                       Telegram Bot API  ──▶  the video, in your chat
+```
 
-Use [`deployment.md`](deployment.md) for the step-by-step terminal guide for Telegram Serverless, Windows CMD/PowerShell, Linux/macOS, and Android Termux.
+**New here? → [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** is a complete step-by-step
+guide that runs entirely from Termux on an Android phone.
 
-**Architecture:** Telegram Serverless handles commands and updates. The worker uses [**TypeTube from the requested GitHub repository**](https://github.com/botstelegram7-cmyk/typetube) first and **yt-dlp only as a fallback**, with FFmpeg for audio/video muxing. TypeTube needs Node.js TCP sockets and filesystem access, which are not available in Telegram Serverless's V8 runtime, so the worker must run on a compatible Node/Docker host.
-
-## Telegram bot profile
-
-Suggested description, about text, keywords, and command menu are documented in [`BOT_PROFILE.md`](BOT_PROFILE.md). Apply them through @BotFather; a GitHub file cannot change the live bot profile automatically.
+---
 
 ## Features
 
-- Telegram Serverless handlers: `/start`, `/help`, `/quality`, YouTube URLs, and `/download <quality> <URL>`
-- TypeTube-first media download; yt-dlp fallback only after TypeTube errors
-- Authenticated worker requests with a shared secret
-- Temporary files cleaned after each download
-- Telegram hosted Bot API 50 MB upload-limit detection
-- Existing Python polling bot retained as a legacy alternative in `bot.py`
+* **TypeTube-first downloads** — sub-second stream resolution, parallel range
+  downloads (4–32 workers), automatic stream refresh when a CDN URL expires.
+* **Honest fallback** — yt-dlp runs only when TypeTube fails, with the real reason
+  reported to the user (private video, region block, age restriction…).
+* **Automatic quality downgrade** — if a file would exceed Telegram's 50 MB bot-upload
+  limit, the worker retries at the next smaller quality and, if it still cannot fit,
+  offers one-tap "Retry 480p / 360p" buttons.
+* **Cancel button** — long downloads can be stopped from the status message; the job's
+  child processes and sockets are actually torn down.
+* **Live progress** — the status message shows resolve → download percentage → mux →
+  upload, throttled so Telegram's edit limits are never hit.
+* **Secrets stay out of git** — the worker URL and shared secret live in the bot's
+  Telegram database and are set once with `/setup`, which also deletes your message.
+* **Abuse controls** — one job per user, a cooldown and a daily quota.
+* **Audio mode** — `/audio` sends the soundtrack as M4A with proper title/performer
+  metadata (transcoded only when the source is not already AAC).
+* **Real tests** — the Serverless handlers run locally against a stub SDK
+  (`tests/stubs/`), so the whole bot is covered without deploying.
 
-## Quick deployment summary
+## Requirements
 
-1. Enable Serverless in @BotFather → your bot → **Serverless**.
-2. Deploy the Node/Docker download worker described in [`worker/README.md`](worker/README.md).
-3. Clone this repository, run `npm install`, and validate the module structure with `npm run check:tgcloud`.
-4. Edit the safe-placeholder module `tgcloud/lib/config.js` with the worker HTTPS URL and the same shared secret used by the worker. Never commit real values.
-5. Run `npx tgcloud login` and paste the **Serverless CLI access token** from @BotFather → Serverless → CLI Access.
-6. Run `npx tgcloud run handlers/message '{ chat: { id: 123456, type: "private" }, text: "/start" }'`.
-7. Run `npm test` and `npm run check:tgcloud`, then `npm run deploy` and `npx tgcloud migrate`; confirm the `user_preferences` table migration.
-8. Run `npx tgcloud webhook`.
-9. Test with `/download 360p https://youtu.be/VIDEO_ID`.
+| Piece | Requirement |
+|---|---|
+| Telegram bot | Created in [@BotFather](https://t.me/BotFather) with **Serverless enabled** |
+| Node.js (for the CLI) | 18 or newer locally; the worker image pins **Node 24** |
+| Worker host | Render (a free instance is enough for personal use) — see [the free plan notes](docs/DEPLOYMENT.md#free-plan-reality-check) |
+| Node.js (for TypeTube) | **22.15+ / 24** — TypeTube needs zlib zstd; see [TYPETUBE_COMPAT.md](docs/TYPETUBE_COMPAT.md) |
 
+## Quick start
 
-The repository includes `tgcloud/lib/config.js` with empty safe placeholders so the Serverless compiler can resolve imports on a fresh clone. Never commit real secrets entered into that file. See [`deployment.md`](deployment.md) for setup and troubleshooting.
+```bash
+# 1. Bot handlers → Telegram Serverless
+npm install
+npx tgcloud login      # paste the CLI access token: @BotFather → your bot → Serverless → CLI Access
+npm run check          # layout + syntax + all tests, before you deploy anything
+npx tgcloud push
+npx tgcloud migrate
+npx tgcloud webhook
 
-## Legacy polling deployment
+# 2. Worker → Render
+#    Dashboard → New → Blueprint → pick this repository (render.yaml configures it)
 
-The original Python bot in `bot.py` is retained for users who want to run a conventional always-on process instead. It is **not** the Telegram Serverless entry point. See the Python requirements, Dockerfile, and Render configuration if you intentionally want that alternative. Do not run both polling and Serverless handlers for the same bot at the same time.
+# 3. Connect them, in Telegram
+/setup https://your-worker.onrender.com YOUR_WORKER_SECRET
+```
 
-## Safety and upload limits
+Full walkthrough with screenshots-in-words: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
-Only download media you own or are authorized to save. Respect copyright, YouTube's terms, and applicable law. The hosted Telegram Bot API currently limits bot uploads to 50 MB per file; the worker reports oversized downloads and recommends a lower quality.
+## Commands
+
+| Command | What it does |
+|---|---|
+| `/start` | Introduction and the legal note |
+| `/help` | Usage, limits and your current settings |
+| `/quality` | Buttons to pick 360p–2160p (also `/quality 480p`) |
+| `/audio` `/video` | Switch between audio-only (M4A) and video with sound |
+| `/download 480p <link>` | One-off quality for a single link |
+| `/status` | Worker health and your running job |
+| `/cancel` | Stop your running download |
+| `/about` | Credits, limits and sources |
+| `/setup <url> <secret>` | **Owner** — connect the Render worker |
+| `/config` | **Owner** — show the current configuration |
+| `/stats` | **Owner** — worker queue, memory, TypeTube status |
+| `/unset` | **Owner** — forget the worker credentials |
+
+Sending a bare YouTube link (video, Shorts or `youtu.be`) downloads it with your saved
+settings.
+
+## Repository layout
+
+```
+tgcloud/                  Deployed to Telegram (the only folder that is)
+├─ handlers/
+│  ├─ message.js          All commands and link handling
+│  └─ callback_query.js   Inline buttons: quality, cancel, retry smaller
+├─ lib/
+│  ├─ config.js           Non-secret settings (owner id, limits, defaults)
+│  ├─ youtube.js          URL/command logic, shared with the worker via test fixtures
+│  ├─ messages.js         Every user-facing string
+│  ├─ storage.js          Database access (settings, preferences, jobs)
+│  ├─ worker_api.js       Authenticated client for the Render worker
+│  └─ download_flow.js    The single path every download takes
+└─ schema.js              user_preferences, bot_settings, download_jobs
+
+worker/                   Deployed to Render
+├─ src/
+│  ├─ index.js            Boot, health endpoint, graceful shutdown
+│  ├─ server.js           HTTP surface: /download, /jobs/:id/cancel, /health, /stats
+│  ├─ queue.js            Concurrency limits, one job per chat, cancellation
+│  ├─ downloader.js       TypeTube-first with downgrade ladder and normalised results
+│  ├─ typetube.js         Runtime guard for TypeTube (the zstd/Node issue)
+│  ├─ ytdlp.js            Fallback engine with progress parsing
+│  ├─ telegram.js         Bot API client: JSON calls + streamed multipart uploads
+│  ├─ job.js              One job end to end: status, download, upload, cleanup
+│  ├─ ffmpeg.js           Mux/convert helpers
+│  ├─ thumbnail.js        Preview thumbnails for sendVideo
+│  └─ validate.js         Shared URL/quality rules (mirrors tgcloud/lib/youtube.js)
+├─ test/                  Unit tests (node:test)
+└─ Dockerfile             Node 24 + FFmpeg + yt-dlp
+
+tests/                    Tests for the Serverless side
+├─ handlers.test.mjs      Real handlers against a stub SDK
+├─ youtube.test.mjs       URL rules using the shared fixture file
+├─ worker_api.test.mjs    Retry/backoff and error mapping
+├─ structure.test.mjs     Platform layout rules
+└─ stubs/                 In-memory SDK + module resolution hook
+
+docs/                     DEPLOYMENT · ARCHITECTURE · TROUBLESHOOTING · TYPETUBE_COMPAT
+render.yaml               Render Blueprint for the worker
+```
+
+## Testing
+
+```bash
+npm run check        # everything: modules, syntax, bot tests, worker tests
+npm test             # Serverless side only (69 tests)
+npm run test:worker  # worker only (62 tests)
+npm run check:modules
+```
+
+The Serverless side is tested by resolving `sdk` to an in-memory stub:
+
+```bash
+node --import ./tests/stubs/register.mjs --test tests/
+```
+
+That means `sgcloud`/`tgcloud` handler logic — quotas, buttons, config, error copy —
+is covered without touching Telegram.
+
+## How it works, in detail
+
+* [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — components, request lifecycle, why the
+  worker exists, failure modes, and the one limitation worth knowing (the worker
+  cannot write into the bot's database).
+* [docs/TYPETUBE_COMPAT.md](docs/TYPETUBE_COMPAT.md) — the Node/zstd requirement, the
+  bug in `typetube@1.1.4` it works around, and what to do on each runtime.
+* [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — symptom → cause → fix.
+
+## Limits and legal notes
+
+* Telegram's hosted Bot API allows **50 MB per uploaded file**. Larger videos need a
+  lower quality; a self-hosted Bot API server raises this ceiling and `MAX_UPLOAD_MB`
+  exists for that case.
+* TypeTube's public cluster allows **60 resolves/minute and 1,500/day per IP address**.
+  A private key raises the quota and unlocks 256 kbps audio.
+* Some music/VEVO tracks are restricted by YouTube to the cluster's region and will
+  fail with HTTP 403. Hosting the worker in Singapore gives the best results.
+* **Download only what you own or are authorised to save.** Respect copyright,
+  YouTube's Terms of Service and your local law. The bot repeats this on `/start`,
+  `/about` and `/help`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE)
