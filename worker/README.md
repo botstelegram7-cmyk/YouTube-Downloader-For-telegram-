@@ -4,7 +4,7 @@ This service runs outside Telegram Serverless because TypeTube needs Node.js soc
 
 ## Required environment
 
-- `BOT_TOKEN`: the Telegram bot token from BotFather
+- `BOT_TOKEN`: the normal BotFather bot token (not the Serverless CLI access token)
 - `WORKER_SECRET`: long random shared secret, matching the local-only `tgcloud/lib/config.js`
 - `PORT`: supplied by the host (defaults to 8080)
 - `MAX_CONCURRENT_DOWNLOADS`: optional worker concurrency (default 2)
@@ -35,4 +35,4 @@ Check `http://localhost:8080/health`. Never commit real tokens or shared secrets
 
 Do not deploy this worker from the repository root: the root Dockerfile belongs to the legacy Python polling bot.
 
-The worker sends videos through Telegram's hosted Bot API, which currently limits uploads to 50 MB per file. TypeTube's public cluster has per-IP quotas; those quotas can change. Use only for content you are authorized to download.
+The worker sends videos through Telegram's hosted Bot API, which currently limits uploads to 50 MB per file. API ID/API hash are MTProto application credentials and do not automatically remove this Bot API limit. TypeTube's public cluster has per-IP quotas; those quotas can change. Use only for content you are authorized to download.
