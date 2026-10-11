@@ -172,7 +172,7 @@ npx tgcloud run handlers/message '{ chat: { id: 123456, type: "private" }, text:
 
 Use a test chat ID for local handler testing; the command may attempt to send a real Telegram message if that chat exists and is accessible to the bot.
 
-Check that the local secret file exists before pushing:
+Check that the worker config module exists before deploying:
 
 - Linux/macOS/Termux: `test -f tgcloud/lib/config.js && echo "worker config present"`
 - Windows CMD: `if exist tgcloud\lib\config.js (echo worker config present) else (echo MISSING worker config)`
@@ -200,6 +200,8 @@ Open the bot in Telegram and test:
 For day-to-day development:
 
 ```bash
+npm test
+npm run check:tgcloud
 npx tgcloud status
 npx tgcloud diff
 npm run deploy
