@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: youtube-downloader-telegram
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: MAX_FILE_MB
+        value: "48"
+      - key: DEFAULT_QUALITY
+        value: 720p
+      - key: DOWNLOAD_TIMEOUT
+        value: "900"
+      - key: LOG_LEVEL
+        value: INFO
