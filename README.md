@@ -27,7 +27,7 @@ Production-oriented Python Telegram bot using **python-telegram-bot (PTB) 22.8**
 | DOWNLOAD_TIMEOUT | No | 900 | Download timeout in seconds |
 | LOG_LEVEL | No | INFO | Logging level |
 
-There is no application-level `MAX_FILE_MB` cap: the bot downloads the selected quality and then checks the result against Telegram's hosted Bot API 50 MB upload limit. Oversized files are reported clearly and the user is prompted to retry at a lower quality. Telegram may still reject uploads below this threshold due to API/provider constraints.
+There is no application-level file-size cap: the bot downloads the selected quality and then checks the result against Telegram's hosted Bot API 50 MB upload limit. Oversized files are reported clearly and the user is prompted to retry at a lower quality. Telegram may still reject uploads below this threshold due to API/provider constraints.
 
 ## Local install (Linux/macOS/VPS)
 ```bash
