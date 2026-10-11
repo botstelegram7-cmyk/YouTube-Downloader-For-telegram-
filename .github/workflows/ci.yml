@@ -16,5 +16,7 @@ jobs:
           python-version: '3.12'
       - name: Compile Python files
         run: python -m compileall -q bot.py config.py
+      - name: Check JavaScript syntax
+        run: node --check worker/server.js && node --check tgcloud/handlers/message.js && node --check tgcloud/lib/config.example.js
       - name: Check whitespace
         run: git diff --check
