@@ -12,7 +12,7 @@ __pycache__/
 venv/
 
 # Runtime files
- downloads/
+downloads/
 *.log
 *.tmp
 .DS_Store
