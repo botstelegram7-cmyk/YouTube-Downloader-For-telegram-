@@ -3,7 +3,7 @@
 .env.*
 !.env.example
 worker/.env
-tgcloud/lib/config.js
+tgcloud/lib/config.local.js
 .tgcloud/
 *.pem
 *.key
