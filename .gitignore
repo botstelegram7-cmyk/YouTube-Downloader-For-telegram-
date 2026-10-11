@@ -1,0 +1,18 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime files
+ downloads/
+*.log
+*.tmp
+.DS_Store
