@@ -26,7 +26,7 @@ Node/Docker worker (worker/)
 
 - `tgcloud/` is the Serverless module boundary. Only JavaScript modules under its supported paths are deployed.
 - Keep example configs, documentation, Docker files, and package manifests outside `tgcloud/` so they cannot accidentally be interpreted as deployable module names.
-- `tgcloud/lib/config.js` is a valid shared module with empty defaults. Fill it locally when connecting a worker; never commit real secrets.
+- `tgcloud/lib/config.js` is a valid shared module with empty defaults. Fill it locally when connecting a worker; the same `WORKER_SECRET` must also be set in the worker host environment. Never commit real secrets.
 - `worker/` is a standalone Node.js service and has its own `package.json` and Dockerfile.
 - `bot.py` is retained as a legacy alternative and is not the Serverless entry point.
 
