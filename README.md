@@ -8,6 +8,10 @@ Use [`deployment.md`](deployment.md) for the step-by-step terminal guide for Tel
 
 **Architecture:** Telegram Serverless handles commands and updates. The worker uses [**TypeTube from the requested GitHub repository**](https://github.com/botstelegram7-cmyk/typetube) first and **yt-dlp only as a fallback**, with FFmpeg for audio/video muxing. TypeTube needs Node.js TCP sockets and filesystem access, which are not available in Telegram Serverless's V8 runtime, so the worker must run on a compatible Node/Docker host.
 
+## Telegram bot profile
+
+Suggested description, about text, keywords, and command menu are documented in [`BOT_PROFILE.md`](BOT_PROFILE.md). Apply them through @BotFather; a GitHub file cannot change the live bot profile automatically.
+
 ## Features
 
 - Telegram Serverless handlers: `/start`, `/help`, `/quality`, YouTube URLs, and `/download <quality> <URL>`
