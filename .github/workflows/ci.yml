@@ -1,4 +1,4 @@
-name: Python checks
+name: Repository checks
 
 on:
   push:
@@ -6,20 +6,30 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  compile:
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Compile Python files
+      - name: Compile legacy Python files
         run: python -m compileall -q bot.py config.py
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Run unit tests
+        run: npm test
+      - name: Validate Telegram Serverless module layout
+        run: npm run check:tgcloud
       - name: Check JavaScript syntax
-        run: node --check worker/server.js && node --check tgcloud/handlers/message.js && node --check tgcloud/lib/config.example.js
+        run: node --check worker/server.js && node --check tgcloud/handlers/message.js && node --check tgcloud/lib/config.js && node --check tgcloud/lib/youtube.js
       - name: Check whitespace
         run: git diff --check
