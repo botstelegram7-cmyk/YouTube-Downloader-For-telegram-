@@ -1,2 +1,6 @@
-// Reserved for future durable user preferences and job history.
-// No database migration is needed for the current handler.
+import { table, integer, text } from 'sdk/db';
+
+export const userPreferences = table('user_preferences', {
+  userId: integer('user_id').primaryKey(),
+  quality: text('quality').notNull().default('720p'),
+});
