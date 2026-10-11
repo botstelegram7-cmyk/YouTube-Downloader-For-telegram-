@@ -1,38 +1,116 @@
-# TypeTube download worker
+# Download worker
 
-This service runs outside Telegram Serverless because TypeTube needs Node.js sockets, a filesystem, and FFmpeg. TypeTube is the primary downloader; yt-dlp is used only if TypeTube fails.
+The Node service that actually downloads videos: **TypeTube first**, yt-dlp as a
+fallback, FFmpeg for muxing, then upload to Telegram.
 
-## Required environment
+It exists because Telegram Serverless gives you a V8 sandbox with no filesystem, no npm
+packages and no TCP sockets — none of which TypeTube can run without. See
+[docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for the full picture.
 
-- `BOT_TOKEN`: the normal BotFather bot token (not the Serverless CLI access token)
-- `WORKER_SECRET`: long random shared secret, matching the local-only `tgcloud/lib/config.js`
-- `PORT`: supplied by the host (defaults to 8080)
-- `MAX_CONCURRENT_DOWNLOADS`: optional worker concurrency (default 2)
-
-## Run with Docker
-
-From the repository root:
+## Run it locally
 
 ```bash
-docker build -t youtube-downloader-worker -f worker/Dockerfile worker
-docker run --rm -p 8080:8080 \
-  -e BOT_TOKEN='YOUR_BOT_TOKEN' \
-  -e WORKER_SECRET='YOUR_LONG_RANDOM_SECRET' \
-  youtube-downloader-worker
+cd worker
+npm install
+cp .env.example .env      # fill in BOT_TOKEN and WORKER_SECRET
+node --env-file=.env src/index.js
 ```
 
-Check `http://localhost:8080/health`. Never commit real tokens or shared secrets.
+`--env-file` needs Node 20.6+; otherwise export the variables in your shell. Then:
 
+```bash
+curl -s http://127.0.0.1:8080/health
+curl -s -H "Authorization: Bearer $WORKER_SECRET" http://127.0.0.1:8080/stats
+```
 
-## Deploy on Render
+Submit a real job (this downloads and uploads to your chat):
 
-1. Create a **Web Service** and connect this repository.
-2. Set **Root Directory** to `worker` and select the **Docker** runtime.
-3. Configure `BOT_TOKEN`, `WORKER_SECRET`, and optionally `MAX_CONCURRENT_DOWNLOADS=2`.
-4. Use an always-on instance for reliable long-running downloads.
-5. Deploy, then check `https://YOUR-WORKER.onrender.com/health`.
-6. Use the base HTTPS service URL and the same shared secret in `tgcloud/lib/config.js`.
+```bash
+curl -s -X POST http://127.0.0.1:8080/download \
+  -H "content-type: application/json" \
+  -H "Authorization: Bearer $WORKER_SECRET" \
+  -d '{"url":"https://youtu.be/jNQXAC9IVRw","chat_id":<your chat id>,"status_message_id":<a message id>,"quality":"360p","mode":"video"}'
+```
 
-Do not deploy this worker from the repository root: the root Dockerfile belongs to the legacy Python polling bot.
+`status_message_id` must be a message the bot may edit — easiest is to send `/start` to
+your bot and use the message id of its reply.
 
-The worker sends videos through Telegram's hosted Bot API, which currently limits uploads to 50 MB per file. API ID/API hash are MTProto application credentials and do not automatically remove this Bot API limit. TypeTube's public cluster has per-IP quotas; those quotas can change. Use only for content you are authorized to download.
+## Tests
+
+```bash
+npm test     # 62 tests, no network
+npm run lint # syntax + hygiene
+```
+
+### Verify the whole pipeline locally
+
+`scripts/e2e_local.mjs` starts a fake Telegram Bot API, boots this worker against it and
+runs a real download, so you can check a change to the download or upload path without a
+bot token or a deployment:
+
+```bash
+node scripts/e2e_local.mjs                                      # 20-second test video, 360p
+node scripts/e2e_local.mjs https://youtu.be/XXXXXXXXXXX 720p audio
+FFMPEG_BINARY=/path/to/ffmpeg node scripts/e2e_local.mjs        # if ffmpeg is not on PATH
+```
+
+It prints the health report, every status edit the worker made, the upload method and
+size, and ends with `✅ PASS` when the file was delivered.
+
+### Self-hosted Bot API server (optional)
+
+Set `TELEGRAM_API_BASE=http://127.0.0.1:8081` and raise `MAX_UPLOAD_MB` (up to 2000) to
+send files larger than the hosted Bot API's 50 MB limit. Uploads follow the scheme of
+that URL, so a local server on plain http works.
+
+## Environment variables
+
+Every variable is validated at boot; a bad value produces one readable list of problems.
+The full reference with defaults lives in [`.env.example`](.env.example). The ones that
+actually matter on a small instance:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `BOT_TOKEN` | — | BotFather bot token, used for uploads and status edits |
+| `WORKER_SECRET` | — | ≥ 16 chars; generate with `openssl rand -hex 32` |
+| `PORT` | `8080` | Render injects its own value |
+| `MAX_CONCURRENT_DOWNLOADS` | `1` | Keep 1 on 512 MB |
+| `DOWNLOAD_WORKERS` | `4` | TypeTube range workers |
+| `CHUNK_SIZE_MB` | `8` | Range chunk size |
+| `MAX_UPLOAD_MB` | `50` | Hosted Bot API cap; raise only with a local Bot API server |
+| `AUTO_DOWNGRADE` | `true` | Retry smaller when the result would not fit |
+| `YTDLP_FALLBACK` | `true` | Use yt-dlp when TypeTube fails |
+| `STRICT_STARTUP` | `false` | Refuse to boot when TypeTube cannot run on this Node |
+
+## HTTP API
+
+| Method | Route | Auth | Purpose |
+|---|---|---|---|
+| GET | `/` | no | Service banner |
+| GET | `/health` | no | Liveness + capabilities (used by Render's health check) |
+| GET | `/stats` | Bearer | Queue, memory, uptime, TypeTube detail |
+| POST | `/download` | Bearer | Queue a job → `202 { job_id, position, running }` |
+| POST | `/jobs/:id/cancel` | Bearer | Stop a job (idempotent) |
+
+Status codes: `400` invalid payload (with a `problems` array), `401` bad secret,
+`409` that chat/user already has a job, `413` body too large, `503` queue full.
+
+## Docker
+
+```bash
+docker build -t yt-worker .
+docker run --rm -p 8080:8080 \
+  -e BOT_TOKEN=... -e WORKER_SECRET=... \
+  yt-worker
+```
+
+The image pins **Node 24** and installs FFmpeg + yt-dlp. The Node version is not
+negotiable — TypeTube needs zlib zstd. See
+[docs/TYPETUBE_COMPAT.md](../docs/TYPETUBE_COMPAT.md).
+
+## Deploying
+
+The repository root ships a Render Blueprint ([`render.yaml`](../render.yaml)) that
+configures this service, including the free-instance-safe defaults. Step-by-step
+instructions, including the keep-alive cron for the free plan:
+[docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md).

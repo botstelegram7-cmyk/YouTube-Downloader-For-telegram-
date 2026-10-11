@@ -1,13 +1,23 @@
 {
-  "name": "youtube-telegram-download-worker",
+  "name": "yt-telegram-download-worker",
+  "version": "2.0.0",
   "private": true,
+  "description": "Download worker for the YouTube Telegram bot: resolves and downloads media with TypeTube (yt-dlp fallback) and delivers it through the Telegram Bot API.",
   "type": "module",
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "main": "src/index.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test test/",
+    "lint": "node scripts/check_syntax.mjs",
+    "check": "npm run lint && npm test"
   },
   "dependencies": {
-    "axios": "^1.12.2",
     "form-data": "^4.0.4",
-    "typetube": "git+https://github.com/botstelegram7-cmyk/typetube.git#main"
-  }
+    "typetube": "^1.1.4"
+  },
+  "license": "MIT"
 }
