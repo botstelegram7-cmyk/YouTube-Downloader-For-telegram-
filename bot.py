@@ -8,11 +8,14 @@ from aiohttp import web
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from config import BOT_TOKEN, MAX_FILE_MB, DEFAULT_QUALITY, ALLOWED_QUALITIES, PORT, DOWNLOAD_TIMEOUT
+from telegram.error import BadRequest
+from config import BOT_TOKEN, DEFAULT_QUALITY, ALLOWED_QUALITIES, PORT, DOWNLOAD_TIMEOUT
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("youtube_downloader")
 active_users: set[int] = set()
+# Telegram's hosted Bot API limits bot uploads to 50 MB per file.
+BOT_API_UPLOAD_LIMIT_BYTES = 50_000_000
 
 async def health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True, "service": "youtube-downloader-bot"})
@@ -68,7 +71,7 @@ async def download_video(url: str, quality: str, output_dir: Path) -> Path:
     if not ffmpeg:
         raise RuntimeError("FFmpeg is missing. Install FFmpeg and restart the bot.")
     command = [
-        executable, "--no-playlist", "--restrict-filenames", "--max-filesize", f"{MAX_FILE_MB}M",
+        executable, "--no-playlist", "--restrict-filenames",
         "-f", f"bv*[height<={quality.rstrip('p')}]+ba/b[height<={quality.rstrip('p')}]",
         "--merge-output-format", "mp4", "--output", str(output_dir / "%(title).100B-%(id)s.%(ext)s"),
         "--no-warnings", "--newline", url
@@ -92,8 +95,6 @@ async def download_video(url: str, quality: str, output_dir: Path) -> Path:
     if not media:
         raise RuntimeError("No video file was produced. Try a lower quality.")
     result = max(media, key=lambda p: p.stat().st_size)
-    if result.stat().st_size > MAX_FILE_MB * 1024 * 1024:
-        raise RuntimeError(f"Video exceeds the configured {MAX_FILE_MB} MiB Telegram upload cap. Try a lower quality.")
     return result
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -114,7 +115,16 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         with tempfile.TemporaryDirectory(prefix="ytbot-") as tmp:
             file_path = await download_video(url, quality, Path(tmp))
-            await status.edit_text(f"⬆️ Uploading {file_path.name} ({file_path.stat().st_size / 1048576:.1f} MiB)…")
+            file_size = file_path.stat().st_size
+            if file_size > BOT_API_UPLOAD_LIMIT_BYTES:
+                size_mb = file_size / 1_000_000
+                await status.edit_text(
+                    f"⚠️ This video is {size_mb:.1f} MB, which exceeds Telegram Bot API's 50 MB upload limit. "
+                    "The download completed, but Telegram cannot receive it through the hosted Bot API. "
+                    "Try /quality 480p or /quality 360p and send the link again."
+                )
+                return
+            await status.edit_text(f"⬆️ Uploading {file_path.name} ({file_size / 1_000_000:.1f} MB)…")
             await context.bot.send_chat_action(chat_id=msg.chat_id, action=ChatAction.UPLOAD_VIDEO)
             with file_path.open("rb") as stream:
                 await msg.reply_video(video=stream, caption=f"🎬 {file_path.stem}", read_timeout=180, write_timeout=180,
@@ -122,6 +132,22 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await status.delete()
     except RuntimeError as exc:
         await status.edit_text(f"❌ {exc}")
+    except BadRequest as exc:
+        error_text = str(exc).lower()
+        if any(term in error_text for term in ("file is too big", "request entity too large", "file size exceeded", "too large")):
+            try:
+                await status.edit_text(
+                    "⚠️ Telegram rejected this upload because the file exceeds its Bot API upload limit. "
+                    "Try /quality 480p or /quality 360p and send the link again."
+                )
+            except Exception:
+                pass
+        else:
+            log.exception("Telegram rejected the upload")
+            try:
+                await status.edit_text(f"❌ Telegram rejected the upload: {exc}")
+            except Exception:
+                pass
     except Exception:
         log.exception("Unhandled error processing a download")
         try:
