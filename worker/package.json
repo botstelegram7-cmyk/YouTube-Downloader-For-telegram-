@@ -8,6 +8,6 @@
   "dependencies": {
     "axios": "^1.12.2",
     "form-data": "^4.0.4",
-    "typetube": "^1.1.4"
+    "typetube": "git+https://github.com/botstelegram7-cmyk/typetube.git#main"
   }
 }
