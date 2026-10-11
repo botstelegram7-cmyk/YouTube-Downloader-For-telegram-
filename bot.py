@@ -33,8 +33,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text(
             f"Send a YouTube video/Shorts URL. Quality options: {', '.join(sorted(ALLOWED_QUALITIES))}.\n"
             f"Default quality: {context.user_data.get('quality', DEFAULT_QUALITY)}.\n"
-            f"Configured upload cap: {MAX_FILE_MB} MiB.\n"
-            "The host must provide FFmpeg. Actual Telegram/provider limits may be lower."
+            "Telegram's hosted Bot API has a 50 MB upload limit per file. If a video is larger, choose a lower quality.\\n"
+            "The host must provide FFmpeg."
         )
 
 async def quality_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
