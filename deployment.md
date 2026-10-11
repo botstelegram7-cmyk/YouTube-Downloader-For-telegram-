@@ -105,6 +105,10 @@ TypeTube's public cluster has per-IP request quotas that may change. The worker 
 
 Do not set the repository root to `/` or leave the root directory blank for this worker deployment: the repository root Dockerfile is for the legacy Python bot. For the worker, use the `worker` root directory. Free services may sleep or stop long-running jobs, so use an always-on worker for reliable downloads.
 
+## Bot description, about text, and command menu
+
+Use the suggested profile text in [BOT_PROFILE.md](BOT_PROFILE.md). In @BotFather, run `/setdescription`, `/setabouttext`, and `/setcommands`. Telegram does not expose a separate tags field for ordinary bots, so include relevant keywords naturally in the description/about text. These changes are made in @BotFather, not by `tgcloud push`.
+
 ## Part C — Enable Telegram Serverless
 
 1. Open Telegram and chat with **@BotFather**.
@@ -246,7 +250,7 @@ The Telegram Serverless handlers run on Telegram after deployment; Termux is onl
 
 ## Telegram Bot API upload limit
 
-The hosted Bot API currently allows bot uploads up to 50 MB per file. The worker detects files above that limit and asks the user to retry with a lower quality, for example:
+The hosted Bot API currently allows bot uploads up to 50 MB per file. API ID/API hash do not replace the CLI access token or bot token and do not automatically remove this upload limit. The worker detects files above that limit and asks the user to retry with a lower quality, for example:
 
 ```
 /download 480p https://youtu.be/VIDEO_ID
@@ -257,7 +261,8 @@ This is a Telegram API limit, not the removed `MAX_FILE_MB` application setting.
 
 ## Troubleshooting
 
-- **CLI token rejected:** make sure you used the Serverless CLI access token, not the bot token.
+- **CLI token rejected:** use the Serverless CLI access token only with `npx tgcloud login`. It is not the bot token and must never be placed in `BOT_TOKEN`.
+- **Termux `cd` says no such file:** the folder name ends with a hyphen. Run `cd ~/YouTube-Downloader-For-telegram-` exactly. Use `pwd` and `ls` if needed; run `npm install` only after you are inside the repository and can see `package.json`.
 - **No handler runs:** check that `tgcloud/handlers/message.js` exists and run `npx tgcloud webhook`.
 - **Worker not configured:** copy `config.example.js` to `config.js`, fill both values, then run `npx tgcloud push` again.
 - **Worker HTTP 401:** `WORKER_SECRET` values do not match.
