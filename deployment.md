@@ -130,8 +130,8 @@ nano tgcloud/lib/config.js
 On Windows CMD:
 
 ```cmd
-copy tgcloud\lib\config.example.js tgcloud\lib\config.js
 notepad tgcloud\lib\config.js
+git update-index --skip-worktree tgcloud/lib/config.js
 ```
 
 Set the worker base URL and the exact same `WORKER_SECRET` configured on the worker host:
@@ -202,7 +202,7 @@ For day-to-day development:
 ```bash
 npx tgcloud status
 npx tgcloud diff
-npx tgcloud push
+npm run deploy
 npx tgcloud webhook
 ```
 
@@ -221,9 +221,10 @@ npm install
 copy tgcloud\lib\config.example.js tgcloud\lib\config.js
 notepad tgcloud\lib\config.js
 npx tgcloud login
+npm run check:tgcloud
 npx tgcloud status
 npx tgcloud run handlers/message "{ chat: { id: 123456, type: 'private' }, text: '/start' }"
-npx tgcloud push
+npm run deploy
 npx tgcloud migrate
 npx tgcloud webhook
 ```
@@ -239,6 +240,7 @@ git clone https://github.com/botstelegram7-cmyk/YouTube-Downloader-For-telegram-
 cd YouTube-Downloader-For-telegram-
 npm install
 nano tgcloud/lib/config.js
+git update-index --skip-worktree tgcloud/lib/config.js
 npx tgcloud login
 npm run check:tgcloud
 npx tgcloud status
