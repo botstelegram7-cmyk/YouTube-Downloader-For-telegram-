@@ -218,8 +218,8 @@ npx tgcloud pull
 git clone https://github.com/botstelegram7-cmyk/YouTube-Downloader-For-telegram-.git
 cd YouTube-Downloader-For-telegram-
 npm install
-copy tgcloud\lib\config.example.js tgcloud\lib\config.js
 notepad tgcloud\lib\config.js
+git update-index --skip-worktree tgcloud/lib/config.js
 npx tgcloud login
 npm run check:tgcloud
 npx tgcloud status
