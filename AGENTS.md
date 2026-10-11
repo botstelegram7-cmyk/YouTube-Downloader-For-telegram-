@@ -15,7 +15,7 @@
 - Serverless modules can import only `sdk`, its submodules, and other modules under `tgcloud/`. Do not import npm packages or files outside `tgcloud/` from Serverless code.
 - Do not put templates such as `config.example.js` inside `tgcloud/`: every `.js` file there is considered a module and module names must be valid.
 - `tgcloud/lib/config.js` contains safe empty defaults in Git. Set deployment-specific worker values locally and never commit real secrets.
-- Keep worker credentials (`BOT_TOKEN`, `WORKER_SECRET`) in the worker host's environment, not in source control.
+- Keep `BOT_TOKEN` in the worker host environment. Configure the same `WORKER_SECRET` on the worker host and in `tgcloud/lib/config.js`; never commit real values to source control.
 - TypeTube must remain the primary downloader; yt-dlp is fallback-only.
 
 ## Before finishing changes
