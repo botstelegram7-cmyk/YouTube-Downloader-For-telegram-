@@ -1,0 +1,13 @@
+{
+  "name": "youtube-downloader-telegram-serverless",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "tgcloud push",
+    "status": "tgcloud status",
+    "diff": "tgcloud diff"
+  },
+  "devDependencies": {
+    "@tgcloud/cli": "^0.2.0"
+  }
+}
