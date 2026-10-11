@@ -23,4 +23,16 @@ docker run --rm -p 8080:8080 \
 
 Check `http://localhost:8080/health`. Never commit real tokens or shared secrets.
 
+
+## Deploy on Render
+
+1. Create a **Web Service** and connect this repository.
+2. Set **Root Directory** to `worker` and select the **Docker** runtime.
+3. Configure `BOT_TOKEN`, `WORKER_SECRET`, and optionally `MAX_CONCURRENT_DOWNLOADS=2`.
+4. Use an always-on instance for reliable long-running downloads.
+5. Deploy, then check `https://YOUR-WORKER.onrender.com/health`.
+6. Use the base HTTPS service URL and the same shared secret in `tgcloud/lib/config.js`.
+
+Do not deploy this worker from the repository root: the root Dockerfile belongs to the legacy Python polling bot.
+
 The worker sends videos through Telegram's hosted Bot API, which currently limits uploads to 50 MB per file. TypeTube's public cluster has per-IP quotas; those quotas can change. Use only for content you are authorized to download.
