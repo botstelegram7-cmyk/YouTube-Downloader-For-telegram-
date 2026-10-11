@@ -25,16 +25,16 @@ Suggested description, about text, keywords, and command menu are documented in 
 
 1. Enable Serverless in @BotFather → your bot → **Serverless**.
 2. Deploy the Node/Docker download worker described in [`worker/README.md`](worker/README.md).
-3. Clone this repository and run `npm install`.
-4. Copy `tgcloud/lib/config.example.js` to `tgcloud/lib/config.js` and fill in the worker HTTPS URL and the same shared secret used by the worker.
+3. Clone this repository, run `npm install`, and validate the module structure with `npm run check:tgcloud`.
+4. Edit the safe-placeholder module `tgcloud/lib/config.js` with the worker HTTPS URL and the same shared secret used by the worker. Never commit real values.
 5. Run `npx tgcloud login` and paste the **Serverless CLI access token** from @BotFather → Serverless → CLI Access.
 6. Run `npx tgcloud run handlers/message '{ chat: { id: 123456, type: "private" }, text: "/start" }'`.
-7. Run `npx tgcloud push`, then `npx tgcloud migrate` and confirm the `user_preferences` table migration.
+7. Run `npm run check:tgcloud`, then `npx tgcloud push` and `npx tgcloud migrate`; confirm the `user_preferences` table migration.
 8. Run `npx tgcloud webhook`.
 9. Test with `/download 360p https://youtu.be/VIDEO_ID`.
 
 
-Never commit tokens or the local `tgcloud/lib/config.js` file. See [`deployment.md`](deployment.md) for all commands and troubleshooting.
+The repository includes `tgcloud/lib/config.js` with empty safe placeholders so the Serverless compiler can resolve imports on a fresh clone. Never commit real secrets entered into that file. See [`deployment.md`](deployment.md) for setup and troubleshooting.
 
 ## Legacy polling deployment
 
