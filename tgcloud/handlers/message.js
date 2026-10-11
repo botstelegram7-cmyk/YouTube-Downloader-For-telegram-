@@ -1,4 +1,6 @@
-import { api, fetch } from 'sdk';
+import { api, db, fetch } from 'sdk';
+import { eq } from 'sdk/db';
+import { userPreferences } from '../schema.js';
 import { WORKER_URL, WORKER_SECRET } from '../lib/config.js';
 
 const QUALITIES = new Set(['360p', '480p', '720p', '1080p', '1440p', '2160p']);
@@ -60,7 +62,11 @@ export default async function (message) {
     return;
   }
 
-  let quality = '720p';
+  const userId = message.from?.id;
+  const preference = userId
+    ? await db.select().from(userPreferences).where(eq(userPreferences.userId, userId)).get()
+    : null;
+  let quality = preference?.quality || '720p';
   let urlText = text;
   if (command === '/download') {
     quality = (args[0] || '').toLowerCase();
