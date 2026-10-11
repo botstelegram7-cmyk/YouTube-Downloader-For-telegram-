@@ -160,11 +160,14 @@ Then deploy:
 
 ```bash
 npx tgcloud push
+npx tgcloud migrate
 npx tgcloud status
 npx tgcloud webhook
 ```
 
-The first `npx tgcloud migrate` creates the `user_preferences` table used to persist `/quality` settings. Review and confirm the migration when prompted.\n\nThe Serverless platform manages the webhook for you. Do **not** run `setWebhook` manually for this Serverless deployment, and do not run the old Python polling bot for the same bot at the same time.
+The first `npx tgcloud migrate` creates the `user_preferences` table used to persist `/quality` settings. Review and confirm the migration when prompted.
+
+The Serverless platform manages the webhook for you. Do **not** run `setWebhook` manually for this Serverless deployment, and do not run the old Python polling bot for the same bot at the same time.
 
 Open the bot in Telegram and test:
 
