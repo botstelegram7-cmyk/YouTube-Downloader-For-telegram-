@@ -121,10 +121,10 @@ Official walkthrough: https://core.telegram.org/bots/serverless
 
 ## Part D — Configure the worker connection locally
 
-From the repository root:
+From the repository root, edit the existing `tgcloud/lib/config.js`. It is committed with empty placeholders because every file under `tgcloud/` is treated as a deployable module, and filenames such as `config.example.js` are invalid module names.
 
 ```bash
-cp tgcloud/lib/config.example.js tgcloud/lib/config.js
+nano tgcloud/lib/config.js
 ```
 
 On Windows CMD:
@@ -134,14 +134,14 @@ copy tgcloud\lib\config.example.js tgcloud\lib\config.js
 notepad tgcloud\lib\config.js
 ```
 
-Edit `tgcloud/lib/config.js` and set the worker base URL and the exact same `WORKER_SECRET` configured on the worker host:
+Set the worker base URL and the exact same `WORKER_SECRET` configured on the worker host:
 
 ```js
 export const WORKER_URL = 'https://YOUR-WORKER-HOST.example.com';
 export const WORKER_SECRET = 'YOUR_SAME_RANDOM_SECRET';
 ```
 
-Use the actual HTTPS URL from your worker host. The URL must be the base URL only; the handler appends `/download`. The local `config.js` is git-ignored to help prevent accidental secret commits. Do not remove that ignore rule.
+Use the actual HTTPS URL from your worker host. The URL must be the base URL only; the handler appends `/download`. `tgcloud/lib/config.js` is tracked with safe placeholders so compilation works on a fresh clone. Do not commit real values after editing it. On Git, you can hide local changes from status with `git update-index --skip-worktree tgcloud/lib/config.js`; this is a local safeguard, not a substitute for keeping secrets private.
 
 ## Part E — Install the CLI and link your bot
 
@@ -157,6 +157,7 @@ When prompted, paste the **CLI access token** from **@BotFather → your bot →
 Check the local project state:
 
 ```bash
+npm run check:tgcloud
 npx tgcloud status
 npx tgcloud diff
 ```
@@ -179,7 +180,7 @@ Check that the local secret file exists before pushing:
 Then deploy:
 
 ```bash
-npx tgcloud push
+npm run deploy
 npx tgcloud migrate
 npx tgcloud status
 npx tgcloud webhook
@@ -227,7 +228,7 @@ npx tgcloud migrate
 npx tgcloud webhook
 ```
 
-Before `npx tgcloud push`, make sure you have already deployed the worker and filled `tgcloud/lib/config.js` with its URL and shared secret. The CMD block assumes Git and Node.js are installed.
+Before deploying download functionality, deploy the worker and fill `tgcloud/lib/config.js` with its URL and shared secret. The `/start` and `/help` commands can work with the placeholders; downloads cannot until the worker config is filled. The CMD block assumes Git and Node.js are installed.
 
 ## Termux quick path (Android)
 
@@ -237,11 +238,11 @@ pkg install -y git nodejs-lts
 git clone https://github.com/botstelegram7-cmyk/YouTube-Downloader-For-telegram-.git
 cd YouTube-Downloader-For-telegram-
 npm install
-cp tgcloud/lib/config.example.js tgcloud/lib/config.js
 nano tgcloud/lib/config.js
 npx tgcloud login
+npm run check:tgcloud
 npx tgcloud status
-npx tgcloud push
+npm run deploy
 npx tgcloud migrate
 npx tgcloud webhook
 ```
@@ -264,7 +265,7 @@ This is a Telegram API limit, not the removed `MAX_FILE_MB` application setting.
 - **CLI token rejected:** use the Serverless CLI access token only with `npx tgcloud login`. It is not the bot token and must never be placed in `BOT_TOKEN`.
 - **Termux `cd` says no such file:** the folder name ends with a hyphen. Run `cd ~/YouTube-Downloader-For-telegram-` exactly. Use `pwd` and `ls` if needed; run `npm install` only after you are inside the repository and can see `package.json`.
 - **No handler runs:** check that `tgcloud/handlers/message.js` exists and run `npx tgcloud webhook`.
-- **Worker not configured:** copy `config.example.js` to `config.js`, fill both values, then run `npx tgcloud push` again.
+- **Worker not configured:** edit `tgcloud/lib/config.js`, fill both values, then run `npm run deploy` again.
 - **Worker HTTP 401:** `WORKER_SECRET` values do not match.
 - **Worker HTTP 503:** the worker reached its concurrency limit; retry shortly.
 - **TypeTube fails:** worker logs should show that it is using yt-dlp as fallback.
@@ -274,7 +275,7 @@ This is a Telegram API limit, not the removed `MAX_FILE_MB` application setting.
 
 ## Security checklist
 
-- Never commit `.env`, `.tgcloud/credentials`, `tgcloud/lib/config.js`, bot tokens, or worker secrets.
+- Never commit real secrets entered into `tgcloud/lib/config.js`, `.env`, `.tgcloud/credentials`, bot tokens, or worker secrets.
 - Keep the worker behind HTTPS and protect its endpoint with the shared secret.
 - Rotate a token/secret immediately if it is exposed.
 - Download only content you own or have permission to save; respect copyright and platform terms.
