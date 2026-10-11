@@ -22,13 +22,12 @@ Production-oriented Python Telegram bot using **python-telegram-bot (PTB) 22.8**
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | BOT_TOKEN | Yes | — | Telegram bot token |
-| MAX_FILE_MB | No | 48 | Application upload-size cap |
 | DEFAULT_QUALITY | No | 720p | Default video quality |
 | PORT | No | 10000 | Health server port |
 | DOWNLOAD_TIMEOUT | No | 900 | Download timeout in seconds |
 | LOG_LEVEL | No | INFO | Logging level |
 
-MAX_FILE_MB is only the application's cap. Actual upload limits depend on Telegram, hosting plan, and network conditions.
+There is no application-level `MAX_FILE_MB` cap: the bot downloads the selected quality and then checks the result against Telegram's hosted Bot API 50 MB upload limit. Oversized files are reported clearly and the user is prompted to retry at a lower quality. Telegram may still reject uploads below this threshold due to API/provider constraints.
 
 ## Local install (Linux/macOS/VPS)
 ```bash
@@ -46,7 +45,6 @@ Edit .env and set your real BOT_TOKEN, then run `python bot.py`. The local .env 
 ## VPS environment variables
 ```bash
 export BOT_TOKEN='PASTE_YOUR_TOKEN_HERE'
-export MAX_FILE_MB=48
 export DEFAULT_QUALITY=720p
 export PORT=10000
 export DOWNLOAD_TIMEOUT=900
