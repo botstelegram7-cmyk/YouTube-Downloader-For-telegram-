@@ -1,0 +1,24 @@
+# Build context for the root Dockerfile: the image only needs worker/package*.json and
+# worker/src, so keep the rest of the repository (and all local state) out of it.
+.git
+.gitignore
+node_modules
+worker/node_modules
+npm-debug.log*
+
+# Not needed at runtime
+tests
+scripts
+docs
+.github
+worker/test
+worker/scripts
+*.md
+!worker/README.md
+
+# Local state and secrets
+.env
+.env.*
+.tgcloud
+*.log
+coverage

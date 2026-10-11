@@ -65,6 +65,26 @@ jobs:
       - name: Verify the container image builds
         run: docker build -t worker-test .
 
+      - name: Verify the root Dockerfile builds (hosts that build the repository root)
+        working-directory: ${{ github.workspace }}
+        run: docker build -t worker-root-test .
+
+      - name: Smoke-test the root image too
+        working-directory: ${{ github.workspace }}
+        run: |
+          docker run --rm -d --name worker-root-ci -p 3000:3000 \
+            -e PORT=3000 \
+            -e BOT_TOKEN=123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+            -e WORKER_SECRET=ci-only-secret-value-0123456789abcdef \
+            worker-root-test
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/health > /tmp/root-health.json; then break; fi
+            sleep 2
+          done
+          cat /tmp/root-health.json
+          grep -q '"ok":true' /tmp/root-health.json
+          docker stop worker-root-ci
+
       - name: Smoke-test the container (config validation, health endpoint)
         run: |
           docker run --rm -d --name worker-ci -p 8080:8080 \

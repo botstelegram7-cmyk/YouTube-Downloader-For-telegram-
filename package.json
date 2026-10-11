@@ -1,6 +1,6 @@
 {
   "name": "youtube-telegram-downloader",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "Telegram Serverless bot that downloads YouTube videos with TypeTube through a Render worker.",
   "type": "module",
@@ -8,7 +8,9 @@
     "node": ">=22.15.0"
   },
   "scripts": {
-    "test": "node --import ./tests/stubs/register.mjs --test \"tests/*.test.mjs\"",
+    "start": "node worker/src/index.js",
+    "build": "npm --prefix worker ci --omit=dev --no-audit --no-fund",
+    "test": "node --import ./tests/stubs/register.mjs --test tests/*.test.mjs",
     "test:worker": "npm --prefix worker test",
     "test:all": "npm test && npm run test:worker",
     "check": "npm run check:modules && npm run check:syntax && npm run test:all",
