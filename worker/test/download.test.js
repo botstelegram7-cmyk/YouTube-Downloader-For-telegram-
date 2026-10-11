@@ -74,6 +74,15 @@ test('a Telegram "file is too big" rejection becomes the downgrade message', () 
   assert.deepEqual(retryQualities, ['720p', '480p', '360p']);
 });
 
+test('with the worker limit removed, the message explains Telegram-s own ceilings', () => {
+  const error = new TelegramApiError('sendVideo', 'Bad Request: file is too big', { code: 400 });
+  const { text, retryQualities } = explainError(error, { maxUploadMb: 0, quality: '1080p' });
+  assert.match(text, /50 MB on the hosted Bot API/);
+  assert.match(text, /2 GB on a self-hosted server/);
+  assert.ok(!text.includes('above Telegram\'s 0 MB'), text);
+  assert.deepEqual(retryQualities, ['720p', '480p', '360p']);
+});
+
 test('the 50 MB downgrade message mentions the smaller quality command', () => {
   const { text } = explainError(new TooLargeError(60_000_000, 50_000_000, { quality: '720p' }));
   assert.match(text, /\/download 480p/);

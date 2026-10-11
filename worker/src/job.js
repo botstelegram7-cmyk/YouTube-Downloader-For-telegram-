@@ -83,10 +83,14 @@ export function explainError(error, { maxUploadMb = 50, quality = '720p' } = {})
     const lower = nextLowerQuality(from) ?? '360p';
     const tried = error.tried?.length ? ` Already retried at ${error.tried.join(', ')}.` : '';
     const size = error.bytes ? ` is ${formatMb(error.bytes)}` : '';
+    // When the worker runs without a limit of its own, the only ceiling left is
+    // Telegram's: 50 MB on the hosted Bot API, 2 GB on a self-hosted server.
+    const limit =
+      Number.isFinite(maxUploadMb) && maxUploadMb > 0
+        ? `above Telegram's ${maxUploadMb} MB upload limit for bots`
+        : "above Telegram's upload limit (50 MB on the hosted Bot API, 2 GB on a self-hosted server)";
     return {
-      text:
-        `⚠️ The finished file${size}, above Telegram's ${maxUploadMb} MB upload limit for bots.${tried} ` +
-        `Pick a smaller quality below, or send /download ${lower} <URL>.`,
+      text: `⚠️ The finished file${size}, ${limit}.${tried} Pick a smaller quality below, or send /download ${lower} <URL>.`,
       retryQualities: smallerQualities(from, 3)
     };
   }

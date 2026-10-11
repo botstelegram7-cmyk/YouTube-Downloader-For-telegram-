@@ -26,7 +26,7 @@ const SPEC = {
   RESOLVE_TIMEOUT_SECONDS: { type: 'int', default: 60, min: 10, max: 300, describe: 'Timeout for resolving a video to streams' },
   DOWNLOAD_WORKERS: { type: 'int', default: 4, min: 1, max: 32, describe: 'Parallel range workers used by TypeTube (4 is safe on 512 MB)' },
   CHUNK_SIZE_MB: { type: 'int', default: 8, min: 1, max: 64, describe: 'Range chunk size for TypeTube downloads' },
-  MAX_UPLOAD_MB: { type: 'int', default: 50, min: 1, max: 2000, describe: 'Largest file we send to Telegram (hosted Bot API cap is 50 MB)' },
+  MAX_UPLOAD_MB: { type: 'int', default: 0, min: 0, max: 2000, describe: 'Largest file we send to Telegram; 0 removes the worker-side limit (Telegram still applies its own)' },
   YTDLP_FALLBACK: { type: 'bool', default: true, describe: 'Use yt-dlp when TypeTube cannot deliver the video' },
   YTDLP_TIMEOUT_SECONDS: { type: 'int', default: 600, min: 60, max: 3600, describe: 'Timeout for the yt-dlp fallback' },
   AUTO_DOWNGRADE: { type: 'bool', default: true, describe: 'Retry at a lower quality when the result exceeds MAX_UPLOAD_MB' },
@@ -151,7 +151,9 @@ export function loadConfig(env = process.env) {
     warnings.push(`PORT=${env.PORT} came from the environment and overrides the default.`);
   }
 
-  config.MAX_UPLOAD_BYTES = config.MAX_UPLOAD_MB * 1_000_000;
+  // 0 means "no limit of our own": the Telegram API is the only thing that can refuse
+  // the file. `Infinity` keeps every size comparison downstream unchanged.
+  config.MAX_UPLOAD_BYTES = config.MAX_UPLOAD_MB > 0 ? config.MAX_UPLOAD_MB * 1_000_000 : Infinity;
   config.CHUNK_SIZE_BYTES = config.CHUNK_SIZE_MB * 1024 * 1024;
   config.JOB_TIMEOUT_MS = config.JOB_TIMEOUT_SECONDS * 1000;
   config.RESOLVE_TIMEOUT_MS = config.RESOLVE_TIMEOUT_SECONDS * 1000;
@@ -161,7 +163,22 @@ export function loadConfig(env = process.env) {
     problems.push('TELEGRAM_API_BASE must be an http(s) URL');
   }
   config.TELEGRAM_API_BASE_IS_CUSTOM = config.TELEGRAM_API_BASE !== 'https://api.telegram.org';
-  config.VERSION = '2.0.0';
+
+  if (config.MAX_UPLOAD_MB === 0) {
+    if (config.TELEGRAM_API_BASE_IS_CUSTOM) {
+      warnings.push(
+        'MAX_UPLOAD_MB=0: uploads are not capped by this worker. With a self-hosted bot API server the ' +
+          'hard ceiling is 2 GB per file.'
+      );
+    } else {
+      warnings.push(
+        'MAX_UPLOAD_MB=0 removes the worker-side limit, but the hosted Bot API still refuses files over ' +
+          '50 MB. Set TELEGRAM_API_BASE to a self-hosted bot API server to send more, or set MAX_UPLOAD_MB ' +
+          'to a number so the worker can downgrade quality before uploading.'
+      );
+    }
+  }
+  config.VERSION = '2.0.1';
 
   return { config, problems, warnings };
 }
@@ -194,7 +211,7 @@ export function describeConfig(config) {
     jobTimeoutSeconds: config.JOB_TIMEOUT_SECONDS,
     downloadWorkers: config.DOWNLOAD_WORKERS,
     chunkSizeMb: config.CHUNK_SIZE_MB,
-    maxUploadMb: config.MAX_UPLOAD_MB,
+    maxUploadMb: config.MAX_UPLOAD_MB > 0 ? config.MAX_UPLOAD_MB : 'unlimited',
     ytDlpFallback: config.YTDLP_FALLBACK,
     autoDowngrade: config.AUTO_DOWNGRADE,
     typeTubeKey: config.TYPETUBE_API_KEY ? 'private' : 'public',

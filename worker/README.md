@@ -59,9 +59,16 @@ size, and ends with `✅ PASS` when the file was delivered.
 
 ### Self-hosted Bot API server (optional)
 
-Set `TELEGRAM_API_BASE=http://127.0.0.1:8081` and raise `MAX_UPLOAD_MB` (up to 2000) to
-send files larger than the hosted Bot API's 50 MB limit. Uploads follow the scheme of
-that URL, so a local server on plain http works.
+`MAX_UPLOAD_MB` defaults to **0 — no limit on the worker's side**. The only ceiling left is
+Telegram's: the hosted Bot API refuses bot uploads above 50 MB, and no worker setting can
+change that. To actually send larger files, run a
+[self-hosted bot API server](https://github.com/tdlib/telegram-bot-api), set
+`TELEGRAM_API_BASE=http://127.0.0.1:8081` and raise `MAX_UPLOAD_MB` to `2000` (the hard
+limit per file). Uploads follow the scheme of that URL, so a local server on plain http
+works.
+
+Setting `MAX_UPLOAD_MB` to a number instead switches the automatic downgrade back on: the
+worker re-downloads at a lower quality when the result would not fit.
 
 ## Environment variables
 
@@ -77,7 +84,7 @@ actually matter on a small instance:
 | `MAX_CONCURRENT_DOWNLOADS` | `1` | Keep 1 on 512 MB |
 | `DOWNLOAD_WORKERS` | `4` | TypeTube range workers |
 | `CHUNK_SIZE_MB` | `8` | Range chunk size |
-| `MAX_UPLOAD_MB` | `50` | Hosted Bot API cap; raise only with a local Bot API server |
+| `MAX_UPLOAD_MB` | `0` | Worker-side upload cap; `0` = unlimited (Telegram still caps at 50 MB unless you self-host the bot API) |
 | `AUTO_DOWNGRADE` | `true` | Retry smaller when the result would not fit |
 | `YTDLP_FALLBACK` | `true` | Use yt-dlp when TypeTube fails |
 | `STRICT_STARTUP` | `false` | Refuse to boot when TypeTube cannot run on this Node |

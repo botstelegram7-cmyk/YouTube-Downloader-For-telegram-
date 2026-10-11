@@ -13,9 +13,38 @@ test('a minimal environment produces a usable configuration', () => {
   assert.deepEqual(problems, []);
   assert.equal(config.PORT, 8080);
   assert.equal(config.MAX_CONCURRENT_DOWNLOADS, 1);
-  assert.equal(config.MAX_UPLOAD_BYTES, 50_000_000);
+  // No worker-side cap by default: Telegram's own limit is the only one left.
+  assert.equal(config.MAX_UPLOAD_BYTES, Infinity);
   assert.equal(config.CHUNK_SIZE_BYTES, 8 * 1024 * 1024);
   assert.equal(config.JOB_TIMEOUT_MS, 900_000);
+});
+
+test('a positive MAX_UPLOAD_MB restores the cap and the downgrade path', () => {
+  const { config, warnings } = loadConfig({ ...VALID, MAX_UPLOAD_MB: '50' });
+  assert.equal(config.MAX_UPLOAD_MB, 50);
+  assert.equal(config.MAX_UPLOAD_BYTES, 50_000_000);
+  assert.equal(warnings.some((line) => line.includes('hosted Bot API still refuses')), false);
+});
+
+test('an unlimited worker explains the hosted Bot API ceiling instead of going quiet', () => {
+  const { warnings } = loadConfig({ ...VALID });
+  assert.ok(
+    warnings.some((line) => line.includes('50 MB')),
+    warnings.join(' | ')
+  );
+});
+
+test('a self-hosted bot API is told the 2 GB ceiling, not the hosted one', () => {
+  const { warnings } = loadConfig({ ...VALID, TELEGRAM_API_BASE: 'http://127.0.0.1:8081' });
+  assert.ok(warnings.some((line) => line.includes('2 GB')), warnings.join(' | '));
+  assert.equal(warnings.some((line) => line.includes('still refuses files over')), false);
+});
+
+test('describeConfig reports the limit as unlimited when it is switched off', () => {
+  const { config } = loadConfig({ ...VALID });
+  assert.equal(describeConfig(config).maxUploadMb, 'unlimited');
+  const { config: capped } = loadConfig({ ...VALID, MAX_UPLOAD_MB: '720' });
+  assert.equal(describeConfig(capped).maxUploadMb, 720);
 });
 
 test('the platform PORT wins over the default', () => {
