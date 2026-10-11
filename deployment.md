@@ -203,6 +203,7 @@ npx tgcloud login
 npx tgcloud status
 npx tgcloud run handlers/message "{ chat: { id: 123456, type: 'private' }, text: '/start' }"
 npx tgcloud push
+npx tgcloud migrate
 npx tgcloud webhook
 ```
 
@@ -221,6 +222,7 @@ nano tgcloud/lib/config.js
 npx tgcloud login
 npx tgcloud status
 npx tgcloud push
+npx tgcloud migrate
 npx tgcloud webhook
 ```
 
