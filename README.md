@@ -1,117 +1,39 @@
 # YouTube Downloader for Telegram
 
-Production-oriented Python Telegram bot using **python-telegram-bot (PTB) 22.8**, yt-dlp, FFmpeg, and environment-based configuration.
+Telegram Serverless bot handlers plus a separate TypeTube download worker.
 
-> Use only to download content you own or are authorized to save. Respect copyright, YouTube's Terms of Service, and applicable law. This project does not bypass DRM, paywalls, or access restrictions.
+## Recommended deployment
+
+Use [`deployment.md`](deployment.md) for the step-by-step terminal guide for Telegram Serverless, Windows CMD/PowerShell, Linux/macOS, and Android Termux.
+
+**Architecture:** Telegram Serverless handles commands and updates. The worker uses **TypeTube first** and **yt-dlp only as a fallback**, with FFmpeg for audio/video muxing. TypeTube needs Node.js TCP sockets and filesystem access, which are not available in Telegram Serverless's V8 runtime, so the worker must run on a compatible Node/Docker host.
 
 ## Features
-- PTB 22.8 async application with /start, /help, and /quality
-- YouTube video and Shorts links; selectable resolution from 360p to 2160p
-- Temporary download directories, timeout handling, Telegram Bot API 50 MB upload-limit detection, logs, and friendly errors
-- HTTP health endpoint at /health for Render health checks
-- config.py, .env.example, Docker support, Render Blueprint, and deployment guide
-- Process environment variables override local .env values
 
-## Requirements
-- Python 3.12+
-- FFmpeg installed and on PATH
-- Telegram bot token from https://t.me/BotFather
-- Internet access to Telegram and YouTube
+- Telegram Serverless handlers: `/start`, `/help`, `/quality`, YouTube URLs, and `/download <quality> <URL>`
+- TypeTube-first media download; yt-dlp fallback only after TypeTube errors
+- Authenticated worker requests with a shared secret
+- Temporary files cleaned after each download
+- Telegram hosted Bot API 50 MB upload-limit detection
+- Existing Python polling bot retained as a legacy alternative in `bot.py`
 
-## Environment variables
-| Variable | Required | Default | Purpose |
-|---|---|---|---|
-| BOT_TOKEN | Yes | — | Telegram bot token |
-| DEFAULT_QUALITY | No | 720p | Default video quality |
-| PORT | No | 10000 | Health server port |
-| DOWNLOAD_TIMEOUT | No | 900 | Download timeout in seconds |
-| LOG_LEVEL | No | INFO | Logging level |
+## Quick deployment summary
 
-There is no application-level file-size cap: the bot downloads the selected quality and then checks the result against Telegram's hosted Bot API 50 MB upload limit. Oversized files are reported clearly and the user is prompted to retry at a lower quality. Telegram may still reject uploads below this threshold due to API/provider constraints.
+1. Enable Serverless in @BotFather → your bot → **Serverless**.
+2. Deploy the Node/Docker download worker described in [`worker/README.md`](worker/README.md).
+3. Clone this repository and run `npm install`.
+4. Copy `tgcloud/lib/config.example.js` to `tgcloud/lib/config.js` and fill in the worker HTTPS URL and the same shared secret used by the worker.
+5. Run `npx tgcloud login` and paste the **Serverless CLI access token** from @BotFather → Serverless → CLI Access.
+6. Run `npx tgcloud run handlers/message '{ chat: { id: 123456, type: "private" }, text: "/start" }'`.
+7. Run `npx tgcloud push` and `npx tgcloud webhook`.
+8. Test with `/download 360p https://youtu.be/VIDEO_ID`.
 
-## Local install (Linux/macOS/VPS)
-```bash
-git clone https://github.com/botstelegram7-cmyk/YouTube-Downloader-For-telegram-.git
-cd YouTube-Downloader-For-telegram-
-sudo apt-get update && sudo apt-get install -y python3 python3-venv ffmpeg git
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env
-```
-Edit .env and set your real BOT_TOKEN, then run `python bot.py`. The local .env is loaded by python-dotenv; real process environment variables take precedence. Never commit your real .env.
+Never commit tokens or the local `tgcloud/lib/config.js` file. See [`deployment.md`](deployment.md) for all commands and troubleshooting.
 
-## VPS environment variables
-```bash
-export BOT_TOKEN='PASTE_YOUR_TOKEN_HERE'
-export DEFAULT_QUALITY=720p
-export PORT=10000
-export DOWNLOAD_TIMEOUT=900
-python bot.py
-```
-For production, use systemd or Docker so the bot survives SSH disconnects. Store secrets in a protected environment file (permissions 600) or the host's secret manager, not in Git.
+## Legacy polling deployment
 
-## Docker
-```bash
-docker build -t youtube-telegram-bot .
-docker run -d --name youtube-telegram-bot --restart unless-stopped --env-file .env -p 10000:10000 youtube-telegram-bot
-docker logs -f youtube-telegram-bot
-```
-Health check: http://YOUR_SERVER_IP:10000/health. Expose the port only if required; use a firewall/reverse proxy where appropriate.
+The original Python bot in `bot.py` is retained for users who want to run a conventional always-on process instead. It is **not** the Telegram Serverless entry point. See the Python requirements, Dockerfile, and Render configuration if you intentionally want that alternative. Do not run both polling and Serverless handlers for the same bot at the same time.
 
-## Render Web Service (dashboard)
-1. Open https://dashboard.render.com/ and choose **New → Web Service**.
-2. Connect this GitHub repository and select the `main` branch.
-3. Select Docker runtime so Render builds the included Dockerfile.
-4. Under **Environment**, add BOT_TOKEN (from BotFather), DEFAULT_QUALITY=720p, DOWNLOAD_TIMEOUT=900, and LOG_LEVEL=INFO.
-5. Deploy, inspect logs, and check `/health` on the service URL.
+## Safety and upload limits
 
-Render injects environment variables into the running process; you do not need to upload a real .env file. After changing variables, save and redeploy. Official docs: https://render.com/docs/configure-environment-variables and https://render.com/docs/web-services.
-
-## Render CLI (CMD / terminal / Termux)
-Install Render CLI using the official OS-specific instructions at https://render.com/docs/cli, then authenticate with:
-```bash
-render login
-render workspace
-render services create --help
-```
-Use the current help output because Render CLI flags may change. Create a `web_service` using Docker, this repository URL, and the main branch. Set BOT_TOKEN through the Render dashboard rather than putting it in command history. Use `render deploys --help` to find the deploy command supported by your installed CLI.
-
-On Ubuntu/Debian, install basic tools with `sudo apt-get update && sudo apt-get install -y git curl`.
-
-On Android Termux:
-```bash
-pkg update && pkg upgrade -y
-pkg install -y git python clang rust binutils ffmpeg
-git clone https://github.com/botstelegram7-cmyk/YouTube-Downloader-For-telegram-.git
-cd YouTube-Downloader-For-telegram-
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env
-nano .env
-python bot.py
-```
-Termux is suitable for development/testing but is not a reliable always-on production host. For Render CLI on Android, follow Render's current support guidance; if its CLI binary is not available for Termux, use the dashboard or a supported Linux PC/VPS.
-
-## Serverless note
-This bot uses Telegram long polling, which requires a continuously running process. A generic short-lived serverless function may stop and break polling. Use Render Web Service, Docker on a VPS, or another always-on worker. A webhook-based serverless architecture needs an HTTPS webhook handler and is not implemented here.
-
-## Troubleshooting
-- BOT_TOKEN missing: set BOT_TOKEN in the process environment or local .env.
-- FFmpeg missing: use the Dockerfile or install FFmpeg on your VPS.
-- File too large: use `/quality 480p` or `/quality 360p`; the hosted Telegram Bot API limit is 50 MB per upload.
-- Video unavailable: check URL and access permissions; update yt-dlp after testing.
-- Bot stops after SSH disconnect: run it under systemd/Docker or use an always-on service.
-- Render health check fails: inspect logs and confirm the PORT is available.
-
-## Security
-- Never commit .env, a Telegram token, or credentials.
-- Rotate the BotFather token immediately if exposed.
-- Review dependency updates and logs before production deployment.
-- Download only content you are authorized to save.
-
-## License
-MIT. See LICENSE.
+Only download media you own or are authorized to save. Respect copyright, YouTube's terms, and applicable law. The hosted Telegram Bot API currently limits bot uploads to 50 MB per file; the worker reports oversized downloads and recommends a lower quality.
