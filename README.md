@@ -25,8 +25,8 @@ Use [`deployment.md`](deployment.md) for the step-by-step terminal guide for Tel
 4. Copy `tgcloud/lib/config.example.js` to `tgcloud/lib/config.js` and fill in the worker HTTPS URL and the same shared secret used by the worker.
 5. Run `npx tgcloud login` and paste the **Serverless CLI access token** from @BotFather → Serverless → CLI Access.
 6. Run `npx tgcloud run handlers/message '{ chat: { id: 123456, type: "private" }, text: "/start" }'`.
-7. Run `npx tgcloud push` and `npx tgcloud webhook`.
-8. Test with `/download 360p https://youtu.be/VIDEO_ID`.
+7. Run `npx tgcloud push`, then `npx tgcloud migrate` and confirm the `user_preferences` table migration.\n8. Run `npx tgcloud webhook`.\n9. Test with `/download 360p https://youtu.be/VIDEO_ID`.
+
 
 Never commit tokens or the local `tgcloud/lib/config.js` file. See [`deployment.md`](deployment.md) for all commands and troubleshooting.
 
