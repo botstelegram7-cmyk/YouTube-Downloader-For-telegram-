@@ -6,7 +6,7 @@ Telegram Serverless bot handlers plus a separate TypeTube download worker.
 
 Use [`deployment.md`](deployment.md) for the step-by-step terminal guide for Telegram Serverless, Windows CMD/PowerShell, Linux/macOS, and Android Termux.
 
-**Architecture:** Telegram Serverless handles commands and updates. The worker uses **TypeTube first** and **yt-dlp only as a fallback**, with FFmpeg for audio/video muxing. TypeTube needs Node.js TCP sockets and filesystem access, which are not available in Telegram Serverless's V8 runtime, so the worker must run on a compatible Node/Docker host.
+**Architecture:** Telegram Serverless handles commands and updates. The worker uses [**TypeTube from the requested GitHub repository**](https://github.com/botstelegram7-cmyk/typetube) first and **yt-dlp only as a fallback**, with FFmpeg for audio/video muxing. TypeTube needs Node.js TCP sockets and filesystem access, which are not available in Telegram Serverless's V8 runtime, so the worker must run on a compatible Node/Docker host.
 
 ## Features
 
