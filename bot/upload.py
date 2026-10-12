@@ -301,6 +301,14 @@ async def _send_via_mtproto(
     cancel_event,
 ) -> UploadOutcome:
     """Send through MTProto: the bot's own session, up to Telegram's 2000 MB ceiling."""
+    # The client is warmed up at boot, but a cold or retrying connection must not look
+    # like a hang: say what is happening and let the upload wait for it.
+    if getattr(uploader, "state", "") in ("idle", "connecting") and reporter is not None:
+        reporter.update_from_thread(
+            "🔌 <b>Connecting to Telegram</b>\n"
+            f"<i>{result.title}</i>\n\n"
+            "Opening the large-file route (MTProto) with the bot token…"
+        )
     handle = await uploader.send(
         result.path,
         chat_id=chat_id,

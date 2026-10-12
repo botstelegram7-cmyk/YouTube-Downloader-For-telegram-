@@ -4,6 +4,51 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 semantic versioning for its configuration surface and behaviour.
 
+## [3.3.1] — 2026-10-12
+
+**A deploy that failed its health check, fixed — and the Pyrogram upload path made explicit.**
+
+### Fixed
+
+* **The service now binds its port before it contacts Telegram at all.** The MTProto client
+  used to be awaited during startup: the handshake (DC discovery, auth-key exchange, DC
+  migration) took over a minute on a real deploy, the platform's health check timed out
+  meanwhile, and the deployment was reported as failed while the bot itself was healthy.
+  Order is now: bind the port → initialise → start → webhook/polling → announce → *then*
+  connect MTProto in the background. A regression test reproduces both halves of that
+  incident (a stalled connection cannot delay readiness; a failing one is retried and never
+  fatal), including an end-to-end scenario, `scripts/e2e_local.py --mtproto-unreachable`,
+  that runs in CI with credentials that cannot connect.
+* **`/health` reports the transport state** (`mtproto: connecting | ready | error | off`)
+  as information, and never fails because of it.
+* **The banner shows the effective webhook address** instead of `None` (it printed the raw
+  `WEBHOOK_URL`, which is empty when the platform supplies `RENDER_EXTERNAL_URL`).
+* `ffmpeg -version` is cached instead of being spawned on every health poll — free-plan
+  platforms poll every few seconds.
+
+### Added
+
+* **`MtprotoUploader.progress_for_pyrogram()`** — the callback Pyrogram calls while
+  uploading, documented as such: it reports percentage, transferred bytes, speed and ETA to
+  the existing status message, and raises from inside the callback when the job is
+  cancelled, so the upload stops immediately rather than after the file has been sent.
+  Videos go out with `send_video` (streamable, with real dimensions and duration), audio
+  with `send_audio`, everything else with `send_document` — each pinned by a test.
+* **A "Connecting to Telegram" status** while a large file waits for the MTProto client to
+  come up, so a cold connection never looks like a hang.
+* `MtprotoUploader.state` / `last_error`, surfaced by `/health`, `/limits` and the logs, so a
+  transport that is configured but not connected is never advertised as usable.
+* Startup phase timings in the log (`startup[1.84s] HTTP server listening …`), so a slow
+  boot is visible in a deploy log instead of inferred.
+
+### Changed
+
+* `/limits` adds a line when the MTProto client is still connecting, or has failed — the
+  ceiling it reports is the one that is reachable, not the one the configuration implies.
+* Attempts to connect MTProto are retried (3 attempts, 20 s apart) and logged with the
+  attempt number; giving up leaves the bot fully functional on the Bot API, and a later
+  large-file request retries on demand.
+
 ## [3.3.0] — 2026-10-12
 
 **No size limits, and no user session: 2000 MB uploads with the bot you already have.**

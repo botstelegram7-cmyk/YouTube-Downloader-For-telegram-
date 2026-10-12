@@ -44,6 +44,16 @@ JavaScript any more.
 - **Delivery:** videos go out with `sendVideo` (streaming, thumbnail, real metadata from
   ffprobe on the local file). A document is only a fallback when Telegram refuses the
   container, and that fallback must be logged.
+- **Startup order is an invariant, not a preference:** `bot/runner.py` binds the HTTP port
+  *before* any call to Telegram, and the MTProto client is connected in a background task
+  (`bot.app.start_uploader`), never awaited in the startup path. A platform fails a deploy
+  whose health check does not answer in time, and the handshake can take minutes. `tests/test_startup.py`
+  exists to keep it that way; `/health` reports `mtproto` as data and must never fail because
+  of it.
+- **Uploads are Pyrogram's standard calls:** `send_video` for video (streamable, with real
+  dimensions and duration), `send_audio` for audio, `send_document` for everything else, each
+  with `progress_for_pyrogram()` so the user sees percentage, bytes, speed and ETA, and so a
+  cancel aborts the transfer immediately.
 - **Honesty:** never state a capability in the UI, logs or docs that the code does not have.
   The upload ceiling is Telegram's — 50 MB on the cloud Bot API, 2000 MB over MTProto with the
   bot token, 2000 MB on a self-hosted local Bot API server. Nothing in this application may cap

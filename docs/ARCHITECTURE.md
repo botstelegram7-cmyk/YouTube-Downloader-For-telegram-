@@ -53,23 +53,22 @@ main.py ─ CLI and entry point
 | Module | Responsibility | Depends on |
 |---|---|---|
 | `config.py` | The whole configuration surface: a frozen `Settings` dataclass, `load_settings()`/`SETTINGS`, range validation, derived values (`upload_capability_mb`, `transport`, `min_free_disk_bytes`, `runs_webhook`, `api_mode`) and the startup summary. Never imports the bot. | stdlib only |
-| `bot/runner.py` | Process lifecycle: `initialize → on_startup → start → (web server + set_webhook \| polling) → wait for SIGTERM/SIGINT → graceful shutdown`. | app, web |
+| `bot/runner.py` | Process lifecycle, ordered so a platform health check always passes: **bind the port → `initialize` → `start` → webhook/polling → startup announcement → MTProto warm-up (background)** → wait for SIGTERM/SIGINT → graceful shutdown. Each phase is timed in the log. | app, web |
 | `bot/app.py` | Builds the PTB `Application`: handler registration, `concurrent_updates(True)`, HTTP timeouts, `base_url`/`base_file_url` for a local Bot API server, optional rate limiter, the startup introduction and the command menu. | handlers, JobManager |
-| `bot/web.py` | The aiohttp app: `/` service card, `/health` + `/healthz` (503 without FFmpeg), `/stats` job snapshot, `POST /<WEBHOOK_PATH>` (secret check, 2 MB payload cap, `Update.de_json`, queue put, immediate 200). | probe, jobs |
-| `bot/handlers/` | Thin adapters. `commands.py` (`/start /help /status /cancel /limits /id /about`), `links.py` (URL extraction → probe → keyboard), `callbacks.py` (`dl:`/`cancel:`/`abort:`), `errors.py` (last-resort handler + `RetryAfter`/`Forbidden` handling). | everything below |
+| `bot/web.py` | The aiohttp app: `/` service card, `/health` + `/healthz` (503 without FFmpeg; reports the transport state as data), `/stats` job snapshot, `POST /<WEBHOOK_PATH>` (secret check, 2 MB payload cap, `Update.de_json`, queue put, immediate 200). The ffmpeg version is cached so frequent health polls cost nothing. | jobs |
+| `bot/handlers/` | Thin adapters. `commands.py` (`/start /help /status /cancel /limits /id /about`), `links.py` (URL extraction → engine resolve → quality keyboard), `callbacks.py` (`dl:`/`cancel:`/`abort:`), `errors.py` (last-resort handler + `RetryAfter`/`Forbidden` handling). | everything below |
 | `bot/jobs.py` | `Job` + `JobManager`: one job per user, auto-cancel, `Semaphore` queue, the download→mux→thumbnail→upload pipeline, progress rendering, cleanup, counters. | download, upload, progress |
 | `bot/download.py` | Download → verify → faststart → thumbnail: drives the engine, then proves the result with ffprobe and checks it against what the transport can send. | typetube, ffmpeg, process |
-| `bot/upload.py` | `sendVideo`/`sendAudio`/`sendDocument`: caption, thumbnail, `supports_streaming`, dimension/duration metadata, byte-accurate upload progress, container-refusal fallback. | progress |
+| `bot/upload.py` | Delivery: picks the transport per file (Bot API under 50 MB, MTProto above it, with a fallback), builds the caption, attaches the thumbnail and `supports_streaming`, streams byte-accurate progress, and falls back to a document when Telegram refuses a container. | progress, mtproto, keyboards |
 | `bot/ffmpeg.py` | ffprobe wrapper, `+faststart` detection and remux, thumbnail generation, audio conversion, version reporting. | process |
 | `bot/typetube.py` | The engine: `resolve --json`, streamed and cancellable downloads, progress parsing, `Track`/`Stream`, `TrackCache` (8-char tokens in `callback_data`). | process |
-| `bot/mtproto.py` | The Pyrogram **bot** client over MTProto (bot token + api_id/hash) that carries uploads above the Bot API ceiling, straight into the user's chat. | upload |
-| `bot/urls.py` | Link extraction, YouTube-only validation and canonicalisation. | — |
-| `bot/qualities.py` | Turns a probed `info` dict into the quality buttons: which heights exist, size estimates (`≈` when derived from bitrate), format selectors. Pure functions — heavily unit-tested. | — |
+| `bot/mtproto.py` | The Pyrogram **bot** client over MTProto (bot token + api_id/hash) that carries uploads above the Bot API ceiling straight into the user's chat: `send_video` / `send_audio` / `send_document`, driven by `progress_for_pyrogram()`. Connects in the background, reports its `state`, never blocks startup. | progress |
+| `bot/urls.py` | Link extraction, YouTube-only validation, canonicalisation and the SSRF guard (scheme allow-list, blocked hosts, DNS-resolution check). | — |
+| `bot/qualities.py` | Turns the resolved `Track` into the quality buttons: the real heights on offer, size estimates (`≈` when derived from bitrate), and an honest note when a track is longer than the transport can carry. Pure functions — heavily unit-tested. | — |
 | `bot/progress.py` | `StatusReporter`: throttled, idempotent status edits with a live cancel button; `UploadProgressFile`: a file wrapper that counts uploaded bytes. | — |
 | `bot/process.py` | `ProcessRegistry`: spawns children with pipes, streams output, terminates them (SIGTERM → grace → SIGKILL). The only place that touches subprocesses. | — |
-| `bot/urls.py` | URL extraction from message text and the SSRF guard (scheme allow-list, blocked hosts, DNS resolution check). | — |
 | `bot/keyboards.py`, `bot/texts.py` | Inline keyboards and every user-facing string (no strings scattered in logic). | — |
-| `bot/utils.py`, `bot/errors.py`, `bot/logging_setup.py`, `bot/runtime.py` | Formatting helpers, the error hierarchy with user-facing `reason` text, logging setup, and the per-application `Runtime` that holds settings, jobs, probe cache and tracked background tasks. | — |
+| `bot/utils.py`, `bot/errors.py`, `bot/logging_setup.py`, `bot/runtime.py` | Formatting helpers, the error hierarchy with user-facing `reason` text, logging setup, and the per-application `Runtime` that holds settings, jobs, the resolved-track cache, the uploader and tracked background tasks. | — |
 
 Dependency direction is strictly one-way: `config` ← `bot.*` ← `handlers` ← `app` ← `runner`.
 `config.py` never imports the bot package, which is what makes `python main.py --check` safe
@@ -257,9 +256,11 @@ message history.
 
 Three layers, each catching what the one below cannot:
 
-1. **Pure unit tests** — `config.py`, `qualities.py`, `urls.py`, `progress.py` (70 tests
-   overall). Quality selection, size estimation, SSRF rules, throttling, and the
-   no-token-leak guarantee are all asserted directly.
+1. **Pure unit tests** — `config.py`, `qualities.py`, `urls.py`, `progress.py`, `startup.py`
+   and the upload transports. Quality selection, size estimation, SSRF rules, throttling, the
+   no-token-leak guarantee, the startup order (the port is bound before Telegram is contacted,
+   and a stalled MTProto handshake cannot delay readiness) and the `send_video` /
+   `send_audio` / `send_document` choice are all asserted directly.
 2. **Integration tests with real media** — `tests/test_ffmpeg.py` builds genuine H.264/AAC
    clips and exercises probing, faststart remuxing, thumbnail limits and audio conversion.
    They skip themselves when no FFmpeg is installed, so the suite stays green on a bare
@@ -269,9 +270,12 @@ Three layers, each catching what the one below cannot:
    asserts the entire delivery: startup introduction, command menu, quality buttons,
    `sendVideo` with caption + thumbnail + `supports_streaming` + dimensions + duration,
    status-message cleanup, temp-directory cleanup, and a clean SIGTERM shutdown. Nothing is
-   mocked except Telegram itself.
+   mocked except Telegram itself. It also runs once more with `--mtproto-unreachable`, where
+   the credentials are configured but the MTProto handshake cannot complete: the bot must
+   still bind its port, answer `/health`, deliver the file on the Bot API and shut down
+   cleanly — the deploy failure that motivated the startup order, reproduced on every push.
 
-CI runs all three on every push — plus a Docker job that rebuilds the image and runs the
+CI runs all of it on every push — plus a Docker job that rebuilds the image and runs the
 e2e *inside* it, which is what proves the container has FFmpeg, the right permissions and a
 working `--check`. It also runs a hygiene job that fails on accidentally committed secrets,
 serverless leftovers or stray artifacts.

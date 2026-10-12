@@ -16,6 +16,12 @@ three, and with them it authorises over MTProto directly, with no phone step.
 Because this client *is* the bot, the file is sent straight to the user's chat — no relay
 chat, no ``copy_message``, no second pass over the network.
 
+Sending follows the standard Pyrogram recipe: :meth:`pyrogram.Client.send_video` for videos
+(so Telegram treats them as playable, streamable videos), :meth:`send_audio` for audio tracks
+and :meth:`send_document` for anything else, each driven by :func:`progress_for_pyrogram`,
+which reports percentage, transferred bytes, speed and ETA while an upload runs and aborts it
+when the user cancels.
+
 Everything degrades politely: without credentials the uploader explains why it is off, and
 :mod:`bot.upload` falls back to the Bot API paths.
 """
@@ -23,6 +29,7 @@ Everything degrades politely: without credentials the uploader explains why it i
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
@@ -59,11 +66,25 @@ class MtprotoUploader:
     the Bot API side of the bot owns the conversation.
     """
 
+    #: Connection states reported by :attr:`state` and shown by ``/health`` and ``/limits``.
+    OFF, IDLE, CONNECTING, READY, ERROR = "off", "idle", "connecting", "ready", "error"
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._client = None
         self._lock = asyncio.Lock()
         self._me: dict | None = None
+        self._state = self.IDLE if self.ready else self.OFF
+        self._last_error = ""
+
+    @property
+    def state(self) -> str:
+        """Where the transport is right now — informational, never a gate."""
+        return self._state
+
+    @property
+    def last_error(self) -> str:
+        return self._last_error
 
     # -- availability -------------------------------------------------------
     def reason(self) -> str:
@@ -109,6 +130,7 @@ class MtprotoUploader:
         async with self._lock:
             if self._client is not None:
                 return True
+            self._state = self.CONNECTING
             client = Client(
                 name="ytbot-uploader",  # never written to disk: the session lives in memory
                 api_id=self.settings.api_id,
@@ -123,6 +145,11 @@ class MtprotoUploader:
             try:
                 await client.start()  # signs in as the bot; no phone, no code
             except Exception as exc:
+                self._state = self.ERROR
+                self._last_error = str(exc)
+                # Leave nothing half-open behind: a later attempt must start from scratch.
+                with contextlib.suppress(Exception):
+                    await client.stop()
                 log.error("MTProto could not authorise the bot: %s", exc)
                 raise UploadError(
                     "Telegram refused the MTProto connection. Check TELEGRAM_API_ID / TELEGRAM_API_HASH "
@@ -130,6 +157,8 @@ class MtprotoUploader:
                     f"Telegram's data centres. Details: {exc}"
                 ) from exc
             self._client = client
+            self._state = self.READY
+            self._last_error = ""
             log.info(
                 "MTProto uploads enabled: bot session authorised, up to %s MB per file",
                 self.capability_mb,
@@ -138,6 +167,8 @@ class MtprotoUploader:
 
     async def stop(self) -> None:
         client, self._client = self._client, None
+        self._me = None
+        self._state = self.IDLE if self.ready else self.OFF
         if client is None:
             return
         try:
@@ -174,8 +205,20 @@ class MtprotoUploader:
         return self._me
 
     # -- sending ------------------------------------------------------------
-    def _progress(self, on_progress, cancel_event, filename: str):
-        """Bridge Pyrogram's progress callback to the status message, honouring cancellation."""
+    def progress_for_pyrogram(self, on_progress, cancel_event, filename: str):
+        """Build the ``progress(current, total)`` callback Pyrogram calls while uploading.
+
+        This is the usual Pyrogram upload-progress recipe, with two differences that suit a
+        bot: the numbers are handed to :class:`bot.progress.StatusReporter`, which owns the
+        single status message and throttles the edits to Telegram's ~1 edit/second, and a
+        cancelled job raises from inside the callback, which aborts the upload immediately
+        instead of after the whole file has been sent.
+
+        :param on_progress: sink for :class:`bot.download.ProgressUpdate` (percentage,
+            transferred bytes, speed, ETA).
+        :param cancel_event: the job's :class:`asyncio.Event`; set means "stop now".
+        :param filename: shown in the status line.
+        """
         started = time.monotonic()
 
         def callback(current: int, total: int, *args) -> None:
@@ -238,7 +281,7 @@ class MtprotoUploader:
 
         client = await self._ensure_client()
         thumb = str(thumbnail) if thumbnail is not None and Path(thumbnail).is_file() else None
-        progress = self._progress(on_progress, cancel_event, path.name)
+        progress = self.progress_for_pyrogram(on_progress, cancel_event, path.name)
         markup = self._markup(source_url)
         html = _parse_mode()
 

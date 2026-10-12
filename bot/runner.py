@@ -2,11 +2,19 @@
 
 One code path is used for both modes so behaviour never differs between them:
 
-1. build the application
+1. build the application and **bind the port** — a web-service platform kills any deploy
+   whose health check does not answer in time, so this happens before any network call
 2. ``initialize()`` → ``start()`` (processing begins)
-3. either serve HTTP and register the webhook, or start long polling
-4. wait for SIGTERM/SIGINT
-5. cancel every job, stop the server, ``stop()`` → ``shutdown()``
+3. either register the webhook, or start long polling
+4. announce the startup (commands, introduction) and then connect the large-file
+   transport — both after updates already flow, and never in the critical path
+5. wait for SIGTERM/SIGINT
+6. cancel every job, stop the server, ``stop()`` → ``shutdown()``
+
+Step 1 is load-bearing. Telegram's MTProto handshake can take minutes on a cold start
+(DC discovery, auth-key exchange, DC migration), and an earlier version of this file
+awaited it before binding the port: the deploy then failed its health check while the
+client was still negotiating, even though the bot itself was perfectly healthy.
 """
 
 from __future__ import annotations
@@ -14,13 +22,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 
 from aiohttp import web
 from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import Application
 
-from bot.app import build_application, on_shutdown, on_startup
+from bot.app import build_application, on_shutdown, on_startup, start_uploader
 from bot.runtime import BOT_DATA_KEY, Runtime
 from bot.web import create_web_app
 from config import Settings
@@ -30,6 +39,11 @@ log = logging.getLogger("bot.runner")
 
 async def run_bot(settings: Settings) -> None:
     """Run until the process is asked to stop."""
+    boot = time.monotonic()
+
+    def phase(label: str) -> None:
+        log.info("startup[%.2fs] %s", time.monotonic() - boot, label)
+
     application = build_application(settings)
     rt: Runtime = application.bot_data[BOT_DATA_KEY]
 
@@ -38,31 +52,54 @@ async def run_bot(settings: Settings) -> None:
 
     web_runner: web.AppRunner | None = None
 
-    await application.initialize()
-    # initialize() does not call post_init (only run_polling/run_webhook do), so the
-    # startup announcement is made explicitly here.
-    await on_startup(application)
-    await application.start()
-
     try:
+        # 1. Answer the platform's health check first, in both modes: /health and /stats
+        #    are cheap and work before Telegram is contacted.
+        web_runner = await _start_web_server(application, settings)
+        phase(f"HTTP server listening on {settings.listen_host}:{settings.port}")
+
+        # 2. Wire the Telegram side.
+        await application.initialize()
+        phase("Telegram application initialised")
+        await application.start()
+        phase("handlers live")
+
         if settings.runs_webhook:
-            web_runner = await _start_web_server(application, settings)
             await _register_webhook(application, settings)
+            phase("webhook registered")
         else:
             await application.updater.start_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True,
             )
-            log.info("Long polling started (no WEBHOOK_URL configured)")
+            phase("long polling started (no WEBHOOK_URL configured)")
+
+        # 3. Announce ourselves. initialize() does not call post_init (only
+        #    run_polling/run_webhook do), so the startup announcement is made explicitly —
+        #    and only now, because it is informational and must not delay the port.
+        await on_startup(application)
+        phase("startup announcement sent")
+
+        # 4. Finally, the large-file transport. Connecting to Telegram over MTProto can
+        #    take a long time (auth key, DC migration) and is retried in the background:
+        #    it decides the *upload ceiling*, never whether the service comes up.
+        start_uploader(rt)
+        phase("MTProto warm-up scheduled")
 
         log.info("Bot is ready — press Ctrl+C to stop")
         await stop.wait()
     finally:
         log.info("Shutting down…")
-        await on_shutdown(application)
 
-        for task in list(rt.background_tasks):
+        # Stop the fire-and-forget work (polling the uploader connection) before the
+        # uploader itself is closed, so nothing reconnects during shutdown.
+        pending = [task for task in list(rt.background_tasks) if not task.done()]
+        for task in pending:
             task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        await on_shutdown(application)
 
         if web_runner is not None:
             await web_runner.cleanup()
@@ -85,10 +122,10 @@ async def _start_web_server(application: Application, settings: Settings) -> web
     site = web.TCPSite(runner, settings.listen_host, settings.port)
     await site.start()
     log.info(
-        "HTTP server listening on %s:%s — health at /health, webhook at /%s",
+        "HTTP server listening on %s:%s — health at /health%s",
         settings.listen_host,
         settings.port,
-        settings.webhook_path,
+        f", webhook at /{settings.webhook_path}" if settings.runs_webhook else " (polling mode: /health only)",
     )
     return runner
 

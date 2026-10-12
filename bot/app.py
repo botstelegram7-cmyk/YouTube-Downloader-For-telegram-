@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from telegram import BotCommand, BotCommandScopeDefault
@@ -100,31 +101,15 @@ def build_application(settings: Settings) -> Application:
 
 
 async def on_startup(application: Application) -> None:
-    """Called once, after ``initialize()``: announce the bot and its commands."""
+    """Called once, after updates are flowing: announce the bot and its commands.
+
+    Nothing here may delay the port or the update loop, and nothing here may take the bot
+    down: every step is informational and logs instead of raising.
+    """
     rt: Runtime = application.bot_data[BOT_DATA_KEY]
     settings = rt.settings
 
     await _publish_commands(application)
-
-    uploader: MtprotoUploader | None = rt.uploader
-    if uploader is not None and uploader.ready:
-        try:
-            await uploader.start()
-            identity = await uploader.identity()
-            log.info(
-                "Large uploads enabled: MTProto as @%s (id %s), up to %s MB per file",
-                identity["username"] or "-",
-                identity["id"],
-                identity["capability_mb"],
-            )
-        except Exception as exc:
-            log.error("MTProto session unavailable, large uploads disabled: %s", exc)
-    elif uploader is not None:
-        log.info(
-            "Large uploads beyond the Bot API's %s MB are unavailable: %s",
-            settings.bot_api_capability_mb,
-            uploader.reason(),
-        )
 
     try:
         me = await application.bot.get_me()
@@ -149,6 +134,57 @@ async def on_startup(application: Application) -> None:
         log.info("Startup summary delivered to chat %s", target)
     except TelegramError as exc:
         log.warning("Could not deliver the startup summary to %s: %s", target, exc)
+
+
+def start_uploader(rt: Runtime, *, attempts: int = 3, delay: float = 20.0) -> None:
+    """Warm up the MTProto transport in the background.
+
+    Deliberately *not* awaited by the startup path. Connecting to Telegram over MTProto
+    costs seconds to minutes on a cold start (DC discovery, auth-key exchange, DC
+    migration), and a web-service platform reports the deploy as failed if the health
+    check does not answer meanwhile — so the port is bound first and this runs after it.
+
+    Failures are retried here and are never fatal: the bot keeps serving on the Bot API,
+    and :meth:`MtprotoUploader._ensure_client` connects lazily if a large file arrives
+    before (or after) the warm-up succeeds.
+    """
+    uploader: MtprotoUploader | None = rt.uploader
+    if uploader is None or not uploader.ready:
+        log.info(
+            "Large uploads beyond the Bot API's %s MB are unavailable: %s",
+            rt.settings.bot_api_capability_mb,
+            uploader.reason() if uploader is not None else "no uploader configured",
+        )
+        return
+    rt.track(asyncio.create_task(_connect_uploader(rt, attempts=attempts, delay=delay)))
+
+
+async def _connect_uploader(rt: Runtime, *, attempts: int, delay: float) -> None:
+    """Connect the MTProto client, retrying a few times, and log exactly what happened."""
+    uploader: MtprotoUploader = rt.uploader  # type: ignore[assignment]
+    for attempt in range(1, attempts + 1):
+        try:
+            await uploader.start()
+            identity = await uploader.identity()
+            log.info(
+                "Large uploads enabled: MTProto as @%s (id %s), up to %s MB per file",
+                identity["username"] or "-",
+                identity["id"],
+                identity["capability_mb"],
+            )
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("MTProto connection attempt %d/%d failed: %s", attempt, attempts, exc)
+            if attempt < attempts:
+                await asyncio.sleep(delay)
+    log.error(
+        "MTProto is unreachable after %d attempts — uploads stay on the Bot API (%s MB per file). "
+        "The bot is unaffected, and a large-file request will retry the connection.",
+        attempts,
+        rt.settings.bot_api_capability_mb,
+    )
 
 
 async def _publish_commands(application: Application) -> None:

@@ -41,11 +41,13 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def limits_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = runtime(context).settings
-    await _reply(
-        update,
-        texts.limits_text(settings.summary()),
-    )
+    rt = runtime(context)
+    settings = rt.settings
+    summary = settings.summary()
+    # The transport's live state, so the answer never promises more than is reachable
+    # *right now* (a client that is still connecting, or has failed, says so).
+    summary["mtproto_state"] = getattr(rt.uploader, "state", "off")
+    await _reply(update, texts.limits_text(summary))
 
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

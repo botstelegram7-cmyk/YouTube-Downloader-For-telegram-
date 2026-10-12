@@ -32,7 +32,8 @@ def banner(name: str, version: str, settings_summary: dict) -> str:
         f"  Telegram   : {settings_summary.get('api_mode')} ({settings_summary.get('api_base')})",
         f"  Upload     : up to {settings_summary.get('upload_capability_mb')} MB per file"
         f"  ({_transport_label(settings_summary)})",
-        f"  Mode       : {mode}" + (f" → {settings_summary.get('webhook_url')}" if mode == "webhook" else ""),
+        f"  Mode       : {mode}"
+        + (f" → {settings_summary.get('webhook')}" if mode == "webhook" else " (long polling)"),
         f"  FFmpeg     : {settings_summary.get('ffmpeg')}",
         f"  Parallel   : {settings_summary.get('max_concurrent_jobs')} job(s)"
         f"  ·  default quality {settings_summary.get('default_quality')}",
@@ -320,6 +321,22 @@ def limits_text(summary: dict) -> str:
             "Its ceiling for bots is 2000 MB — the biggest a bot can ever send, with or without Premium "
             "(Premium's 4 GB is for people, not bots).",
         ]
+        # Honesty about the live connection: the ceiling above is what the protocol allows,
+        # and this says whether that route is actually usable at this moment.
+        state = summary.get("mtproto_state") or "ready"
+        if state in ("connecting", "idle"):
+            lines += [
+                "",
+                "<i>The MTProto client is still connecting. Files above "
+                f"{summary.get('bot_api_capability_mb')} MB will wait for it.</i>",
+            ]
+        elif state in ("error", "off"):
+            lines += [
+                "",
+                "<i>The MTProto client cannot connect right now, so uploads are limited to "
+                f"{summary.get('bot_api_capability_mb')} MB until it does. The server log has the "
+                "reason.</i>",
+            ]
     else:
         lines += [
             "",

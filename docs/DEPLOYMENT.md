@@ -236,7 +236,7 @@ sleeps uses the whole allowance in a month (24 × 31 = 744 h).
 docker compose logs -f bot          # or: render logs / your host's log viewer
 ```
 
-The bot logs one line per meaningful event: link received, probe result, job started,
+The bot logs one line per meaningful event: link received, resolve result, job started,
 quality chosen, download finished, upload method, cleanup — with a job id on every line of
 a job, so grep is enough:
 

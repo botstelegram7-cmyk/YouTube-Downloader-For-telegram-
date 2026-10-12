@@ -58,6 +58,12 @@ jobs:
       - name: End-to-end pipeline (mock Bot API, stubbed engine, real FFmpeg)
         run: python scripts/e2e_local.py
 
+      - name: Deploy regression — MTProto unreachable must not break the service
+        # Reproduces the failed deploy: credentials are configured, the MTProto handshake
+        # cannot complete, and the bot must still bind its port, answer /health, deliver
+        # the file on the Bot API and shut down cleanly.
+        run: python scripts/e2e_local.py --mtproto-unreachable
+
   docker:
     name: Docker image
     runs-on: ubuntu-latest

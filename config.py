@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "3.3.0"
+VERSION = "3.3.1"
 PROJECT_NAME = "YouTube Downloader for Telegram"
 
 # --------------------------------------------------------------------------- #
@@ -462,6 +462,7 @@ class Settings:
             "ffmpeg": self.ffmpeg_path,
             "download_dir": str(self.download_dir),
             "mode": "webhook" if self.runs_webhook else "polling",
+            "webhook": self.webhook_target if self.runs_webhook else "",
             "port": self.port,
             "log_level": self.log_level,
             "owner_user_id": self.owner_user_id or "-",

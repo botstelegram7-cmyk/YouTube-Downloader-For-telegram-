@@ -409,6 +409,13 @@ async def run(args: argparse.Namespace) -> int:
             "LOG_PRETTY": "false",
             "PYTHONUNBUFFERED": "1",
         }
+        if args.mtproto_unreachable:
+            # Valid-shaped but useless credentials: Pyrogram will try, fail, and must not
+            # take the service down with it. This is what a platform deploy looked like
+            # when MTProto was awaited before the port was bound.
+            env["TELEGRAM_API_ID"] = "1234567"
+            env["TELEGRAM_API_HASH"] = "0123456789abcdef0123456789abcdef"
+
         log_path = workdir / "bot.log"
         log_handle = log_path.open("w")
         bot_process = subprocess.Popen(
@@ -454,12 +461,21 @@ async def run(args: argparse.Namespace) -> int:
                 f"mode {health['mode']}"
             )
             # The harness points TELEGRAM_API_BASE at this mock server, i.e. a *local* Bot API
-            # server, whose Telegram-set ceiling is 2000 MB. No API ID/hash is set here, so the
-            # transport stays "bot" — the point being that the app itself never lowers either.
+            # server, whose Telegram-set ceiling is 2000 MB. With --mtproto-unreachable the API
+            # ID/hash are set too, so the reported transport is the MTProto route — which may
+            # well be "connecting" or "error" at this moment: the port must answer regardless.
+            expected_transport = "mtproto" if args.mtproto_unreachable else "bot"
             if health["upload_capability_mb"] != 2000:
                 failures.append(f"unexpected upload capability: {health['upload_capability_mb']}")
-            if health["upload_transport"] != "bot":
+            if health["upload_transport"] != expected_transport:
                 failures.append(f"unexpected transport: {health['upload_transport']}")
+            if args.mtproto_unreachable:
+                state = health.get("mtproto")
+                if state in {"idle", "connecting", "error"}:
+                    ok(f"MTProto is not ready (state={state!r}) yet the bot serves /health")
+                else:
+                    failures.append(f"unexpected MTProto state while unreachable: {state!r}")
+                    fail(f"unexpected MTProto state: {state!r}")
 
         # startup introduction -------------------------------------------------
         intro = await wait_for(
@@ -553,6 +569,22 @@ async def run(args: argparse.Namespace) -> int:
         check("Stopped. Goodbye." in log_text, "graceful shutdown logged")
         check("Traceback" not in log_text, "no unhandled exception in the log")
 
+        if args.mtproto_unreachable:
+            # The deploy failure in one assertion: the port is bound *before* the MTProto
+            # client is even contacted, so a slow handshake can never fail a health check.
+            bound = log_text.find("HTTP server listening")
+            warm_up = log_text.find("MTProto warm-up scheduled")
+            check(bound != -1, "the startup log shows the port being bound")
+            check(
+                bound != -1 and warm_up != -1 and bound < warm_up,
+                "the port is bound before the MTProto connection is attempted",
+            )
+            check("MTProto" in log_text, "the unreachable transport is reported in the log")
+            check(
+                "Traceback" not in log_text and "Shutting down" in log_text,
+                "an unreachable MTProto transport never crashes the service",
+            )
+
         leftovers = [p for p in downloads.glob("job-*") if p.is_dir()]
         check(not leftovers, "temporary download directories removed")
 
@@ -603,6 +635,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-port", type=int, default=8091, help="port for the mock Bot API")
     parser.add_argument("--bot-port", type=int, default=8093, help="port the bot's webhook server listens on")
     parser.add_argument("--keep-files", action="store_true", help="keep the workspace and logs")
+    parser.add_argument(
+        "--mtproto-unreachable",
+        action="store_true",
+        help=(
+            "run the bot with MTProto credentials that cannot connect, and require it to boot, "
+            "answer /health and deliver normally anyway (the deploy-failure regression)"
+        ),
+    )
     return parser.parse_args()
 
 

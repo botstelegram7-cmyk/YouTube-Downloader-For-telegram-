@@ -100,6 +100,28 @@ Small files keep using the Bot API, so nothing changes for the common case. `/li
 `/health`, the startup banner and `python main.py --check` all report the ceiling the
 deployment really has.
 
+### How the upload itself is sent
+
+The large-file route is Pyrogram over MTProto, following the usual recipe:
+
+```python
+await client.send_video(chat_id, video=path, duration=…, width=…, height=…,
+                        thumb=…, supports_streaming=True, progress=progress_for_pyrogram)
+await client.send_audio(chat_id, audio=path, performer=…, title=…, progress=…)
+await client.send_document(chat_id, document=path, progress=…)   # anything else
+```
+
+`MtprotoUploader.progress_for_pyrogram()` feeds percentage, transferred bytes, speed and
+ETA into the same status message the download uses, throttled to Telegram's edit limit, and
+a cancelled job aborts the upload from inside the callback. Files at or under 50 MB stay on
+the Bot API, where python-telegram-bot does the same job with `sendVideo`/`sendAudio`/
+`sendDocument`.
+
+**Startup order matters.** The port is bound before Telegram is contacted, and the MTProto
+client connects in the background: platforms (Render and friends) fail a deploy whose health
+check does not answer in time, and a slow handshake must never decide whether the service
+comes up.
+
 **4000 MB?** Only a *user* account with Premium can, which would mean storing a login session
 for a second account. This bot does not do that.
 

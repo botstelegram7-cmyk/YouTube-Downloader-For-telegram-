@@ -20,8 +20,10 @@ the whole story of one download.
 - [The container exits or restarts in a loop](#the-container-exits-or-restarts-in-a-loop)
 - [Health, webhook and polling](#health-webhook-and-polling)
 - [Links are rejected](#links-are-rejected)
-- [Probing fails](#probing-fails)
+- [Resolving fails](#resolving-fails)
 - [Downloads fail](#downloads-fail)
+- [The deploy fails its health check](#the-deploy-fails-its-health-check)
+- [MTProto: connecting, failed, or "still connecting"](#mtproto-connecting-failed-or-still-connecting)
 - [Uploads fail or stall](#uploads-fail-or-stall)
 - [The delivered file is wrong](#the-delivered-file-is-wrong)
 - [Cancellation, cleanup and disk](#cancellation-cleanup-and-disk)
@@ -136,44 +138,97 @@ item is downloaded — a bot that silently starts 400 downloads is not a feature
 
 ---
 
-## Probing fails
+## Resolving fails
 
-Resolving means the TypeTube CLI reporting a link's streams without downloading (45 s limit;
-`INSPECT_TIMEOUT` in `bot/handlers/links.py`). The failure text in chat lists the usual
-causes; in the log, one of these appears:
+Resolving is the TypeTube CLI reporting a link's streams *without* downloading it
+(``typetube resolve --json``, 45 s limit — ``INSPECT_TIMEOUT`` in ``bot/handlers/links.py``).
+The CLI exits 0 even when it fails, so the bot reads its ``[Error] …`` line rather than the
+exit code, and tells the user which of these happened:
 
 | Log line | Meaning and fix |
 |---|---|
-| `probe timed out` | The site is slow or throttling. Try again; always-on hosts with a distant region (a US datacentre for an Indian-only site) are the usual culprit. Consider `PROXY`. |
-| Not a YouTube link | The bot refuses non-YouTube URLs before the engine sees them, and says which host it rejected. |
-| Private, members-only or age-restricted | The cluster fetches anonymously, so these are unavailable; the bot explains instead of retrying. |
-| `HTTP Error 403` | Region/IP block — a proxy is the usual answer. |
-| `No downloadable formats` | It is a live stream, a text page, or a page whose media loads only after login. |
+| ``TypeTube returned no data for that link`` | The cluster answered, but had nothing to offer — usually a live stream, a premiere, a text page, or a video whose media needs a login. |
+| ``could not reach this video from the server's region (HTTP 403)`` | A region/IP block on the *cluster's* side, not yours. A different ``TYPETUBE_HOST`` is the usual answer. |
+| ``quota`` / ``rate limit`` / ``429`` | Cluster quotas are per IP and shared with everyone else using that host. ``TYPETUBE_API_KEY`` lifts them and unlocks Hi-Fi (256 kbps) audio; without a key, public audio tops out around 160 kbps. |
+| ``resolve timed out`` | The cluster is slow or unreachable. Try again, and check outbound HTTPS from the host. |
+| Not a YouTube link | The bot refuses non-YouTube URLs before the engine sees them and names the host it rejected — the engine would otherwise treat the text as a *search query* and download something unrelated. |
 
 **A stale engine is the most common cause of sudden resolve failures.** YouTube changes
-constantly; bump `TYPETUBE_VERSION` in the Dockerfile and rebuild.
+constantly; bump ``TYPETUBE_VERSION`` in the Dockerfile and rebuild.
 
 ---
 
 ## Downloads fail
 
-**"Requested format is not available".** The bot already guards against this: every
-format selector ends in a plain `best` fallback, so a pick can never fail merely because
-the source's metadata was thin (direct media URLs, unusual extractors). If you still see it,
-the source changed between the probe and the download — send the link again.
+**The engine failed mid-download.** The bot surfaces the CLI's own ``[Error] …`` line
+(cleaned up), stops the process tree and deletes the partial file. Two recurring causes:
 
-**The download stops at a random percentage.** Check the log for the engine's own `[Error]` line:
-`HTTP Error 429` (rate-limited — wait, or set `PROXY`), `Connection reset` (retried
-automatically `YTDLP_RETRIES` times), or `read timed out` (raise
-`YTDLP_SOCKET_TIMEOUT`). The job fails cleanly and its temp files are removed.
+* ``429`` / quota — the shared public cluster. Wait, or set ``TYPETUBE_API_KEY``.
+* ``403`` / ``410`` — the resolved stream URL expired or was refused. The bot re-resolves the
+  link once and retries the download automatically before giving up.
 
 **It never finishes.** `DOWNLOAD_TIMEOUT_SECONDS` (default 3600) ends the job with a clear
 message. On a 0.1 vCPU free tier, a long 1080p download can be starved by the rest of the
 system; lower `MAX_CONCURRENT_JOBS` to 1 and prefer smaller qualities.
 
-**Disk full during a download.** Every job has its own `job-<id>-*` directory under
-`DOWNLOAD_DIR`, deleted when the job ends. Free space is reported by `/status` and in the
-startup log. Give the host about twice the size of the largest file you intend to deliver.
+**"The server is low on disk".** ``MIN_FREE_DISK_MB`` (default 256) keeps headroom for the
+file *plus* its remux. A job that would eat into it is refused before anything is downloaded,
+and if the disk fills during a download the failure is reported as a disk problem with the
+partial file removed. Each job has its own ``job-<id>-*`` directory under ``DOWNLOAD_DIR``,
+deleted when the job ends. Give the host about twice the size of the largest file you intend
+to deliver — that is a hosting constraint, and it is kept separate from Telegram's ceilings
+everywhere it is reported.
+
+---
+
+## The deploy fails its health check
+
+**"Deploy aborted — your service did not pass its health check."** Platforms (Render, Voroa,
+Fly) require the port to answer within a time limit.
+
+The startup order is deliberate and is the fix for this: **the HTTP port is bound before
+Telegram is contacted at all**, and the MTProto client — which can negotiate for over a
+minute on a cold start — connects in the background. The startup log shows each phase with
+its timing:
+
+```
+startup[0.02s] HTTP server listening on 0.0.0.0:8080
+startup[0.61s] Telegram application initialised
+startup[1.20s] handlers live
+startup[1.42s] webhook registered
+startup[1.90s] startup announcement sent
+startup[1.90s] MTProto warm-up scheduled
+```
+
+If a deploy still fails, the port is usually the problem, not the bot:
+
+| Check | Fix |
+|---|---|
+| The platform injects `PORT` and something else is listening | Leave ``PORT`` to the platform; the bot binds ``LISTEN_HOST:PORT`` itself. |
+| Log stops before "HTTP server listening" | The container never started — look further up for a Python traceback (`ConfigError`, a missing binary). |
+| `/health` returns 503 | FFmpeg is missing from the image: ``python main.py --check`` says so. |
+| Nothing is loggable at all | The health check path is not ``/health`` (Render's blueprint sets it), or the service is bound to ``127.0.0.1`` instead of ``0.0.0.0``. |
+
+---
+
+## MTProto: connecting, failed, or "still connecting"
+
+``/health`` reports the transport as data — ``"mtproto": "ready"``, ``"connecting"``,
+``"idle"``, ``"error"`` or ``"off"`` — and **never fails because of it**. That is on purpose:
+a slow or unreachable MTProto route must not take a working bot offline.
+
+* ``error`` — the log says why (``MTProto connection attempt 1/3 failed: …``). The usual
+  causes are a wrong ``TELEGRAM_API_ID``/``TELEGRAM_API_HASH`` pair, or a host that cannot
+  reach Telegram's data centres on 443. The bot keeps retrying three times, then stays on the
+  Bot API; a large-file request retries on demand.
+* ``connecting``/``idle`` — still negotiating (or not tried yet). Files over 50 MB wait for
+  it and the status message says "Connecting to Telegram". ``/limits`` tells the user the
+  same thing.
+* ``off`` — no ``TELEGRAM_API_ID``/``TELEGRAM_API_HASH`` configured, so the Bot API's 50 MB
+  applies. That is a valid deployment, not an error.
+
+Everything still works while MTProto is down: downloads are unaffected, and uploads up to
+50 MB go out through the Bot API.
 
 ---
 

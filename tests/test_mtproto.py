@@ -159,10 +159,10 @@ async def test_the_client_is_built_for_a_bot_and_writes_no_session_file(monkeypa
 
 
 # -- progress and cancellation ------------------------------------------------ #
-def test_progress_is_bridged_with_percentage_and_speed():
+def test_progress_for_pyrogram_reports_percentage_speed_and_eta():
     uploader = MtprotoUploader(WITH_MT)
     seen = []
-    callback = uploader._progress(seen.append, None, "video.mp4")
+    callback = uploader.progress_for_pyrogram(seen.append, None, "video.mp4")
 
     callback(0, 1000)
     callback(250, 1000)
@@ -177,7 +177,7 @@ def test_progress_is_bridged_with_percentage_and_speed():
 def test_a_cancelled_upload_aborts_from_inside_the_progress_callback():
     uploader = MtprotoUploader(WITH_MT)
     cancel_event = asyncio.Event()
-    callback = uploader._progress(None, cancel_event, "video.mp4")
+    callback = uploader.progress_for_pyrogram(None, cancel_event, "video.mp4")
 
     callback(10, 100)  # fine while running
 
@@ -321,3 +321,174 @@ async def test_bot_api_container_failure_still_falls_back_to_a_document(tmp_path
 
     assert outcome.method == "sendDocument"
     assert "send_document" in bot.calls
+
+
+# -- send_video / send_audio / send_document, with live progress --------------- #
+class FakeMedia:
+    file_id = "file-id-123"
+
+
+class FakeMessage:
+    id = 777
+
+    def __init__(self, *, video=None, audio=None, document=None) -> None:
+        self.video = video
+        self.audio = audio
+        self.document = document
+
+
+class RecordingClient:
+    """A Pyrogram client that records which send_* method was used."""
+
+    def __init__(self, *, emit_progress: bool = True) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.emit_progress = emit_progress
+
+    async def send_video(self, **kwargs):
+        return self._record("send_video", kwargs, video=FakeMedia(), audio=None, document=None)
+
+    async def send_audio(self, **kwargs):
+        return self._record("send_audio", kwargs, video=None, audio=FakeMedia(), document=None)
+
+    async def send_document(self, **kwargs):
+        return self._record("send_document", kwargs, video=None, audio=None, document=FakeMedia())
+
+    def _record(self, name, kwargs, *, video, audio, document):
+        self.calls.append((name, kwargs))
+        progress = kwargs.get("progress")
+        if self.emit_progress and progress is not None:
+            progress(0, 900)  # Telegram's callback signature: (current, total)
+            progress(450, 900)
+            progress(900, 900)
+        return FakeMessage(video=video, audio=audio, document=document)
+
+
+def ready_uploader(tmp_path: Path, client) -> MtprotoUploader:
+    uploader = MtprotoUploader(WITH_MT)
+    uploader._client = client
+    uploader._state = MtprotoUploader.READY
+    return uploader
+
+
+def media_file(tmp_path: Path, name: str = "clip.mp4", size: int = 2048) -> Path:
+    path = tmp_path / name
+    path.write_bytes(b"\x00" * size)
+    return path
+
+
+async def test_video_files_go_out_with_send_video(tmp_path):
+    client = RecordingClient()
+    uploader = ready_uploader(tmp_path, client)
+    seen: list = []
+
+    handle = await uploader.send(
+        media_file(tmp_path),
+        chat_id=42,
+        kind="video",
+        caption="<b>A video</b>",
+        duration=12.5,
+        width=1280,
+        height=720,
+        source_url="https://www.youtube.com/watch?v=abcdefghijk",
+        on_progress=seen.append,
+    )
+
+    name, kwargs = client.calls[0]
+    assert name == "send_video"
+    assert kwargs["supports_streaming"] is True, "Telegram must be able to stream it while downloading"
+    assert (kwargs["width"], kwargs["height"]) == (1280, 720)
+    assert kwargs["duration"] == 12
+    assert kwargs["chat_id"] == 42, "the bot sends straight to the user's chat"
+    assert kwargs["video"].endswith("clip.mp4")
+    assert kwargs["reply_markup"] is not None, "the source link travels with the file"
+    assert handle.message_id == 777 and handle.file_id == "file-id-123"
+
+    # progress_for_pyrogram bridged Telegram's byte counts into the status line
+    assert [round(u.percent) for u in seen] == [0, 50, 100]
+    assert all(u.phase == "upload" for u in seen)
+    assert seen[-1].eta is not None and seen[-1].speed > 0
+
+
+async def test_audio_files_go_out_with_send_audio(tmp_path):
+    client = RecordingClient()
+    uploader = ready_uploader(tmp_path, client)
+
+    await uploader.send(
+        media_file(tmp_path, "track.m4a"),
+        chat_id=42,
+        kind="audio",
+        title="A song",
+        artist="An artist",
+        duration=200,
+    )
+
+    name, kwargs = client.calls[0]
+    assert name == "send_audio"
+    assert kwargs["performer"] == "An artist"
+    assert kwargs["title"] == "A song"
+
+
+async def test_anything_else_goes_out_as_a_document(tmp_path):
+    client = RecordingClient()
+    uploader = ready_uploader(tmp_path, client)
+
+    await uploader.send(media_file(tmp_path, "archive.bin"), chat_id=42, kind="document")
+
+    name, kwargs = client.calls[0]
+    assert name == "send_document"
+    assert kwargs["force_document"] is True
+
+
+async def test_a_file_above_telegram_s_ceiling_is_refused_before_the_upload(tmp_path):
+    client = RecordingClient()
+    uploader = ready_uploader(tmp_path, client)
+    uploader.settings = WITH_MT  # 2000 MB ceiling
+
+    oversized = media_file(tmp_path, "huge.mp4", size=2048)
+    # Pretend the file is 2.5 GB without writing 2.5 GB: the check reads st_size.
+    import os
+
+    os.truncate(oversized, 2500 * MB)
+
+    with pytest.raises(UploadError) as error:
+        await uploader.send(oversized, chat_id=42, kind="video")
+
+    assert "2000 MB" in error.value.reason
+    assert client.calls == [], "nothing is uploaded when Telegram would reject it anyway"
+
+
+# -- the connection state machine --------------------------------------------- #
+async def test_a_failed_connection_is_recorded_and_leaves_nothing_half_open(monkeypatch):
+    stopped = {"count": 0}
+
+    class BrokenClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def start(self):
+            raise RuntimeError("unreachable data centre")
+
+        async def stop(self):
+            stopped["count"] += 1
+
+    import pyrogram
+
+    monkeypatch.setattr(pyrogram, "Client", BrokenClient)
+    uploader = MtprotoUploader(WITH_MT)
+
+    with pytest.raises(UploadError) as error:
+        await uploader.start()
+
+    assert uploader.state == MtprotoUploader.ERROR
+    assert uploader._client is None
+    assert "unreachable data centre" in uploader.last_error
+    assert "TELEGRAM_API_ID" in error.value.reason
+    assert stopped["count"] == 1, "the half-open client is closed again"
+
+    # /limits and /health must never promise 2000 MB while that is true.
+    assert uploader.state in ("error", "off")
+
+
+async def test_state_is_off_without_credentials_and_idle_before_connecting():
+    assert MtprotoUploader(WITHOUT_MT).state == MtprotoUploader.OFF
+    assert MtprotoUploader(WITH_MT).state == MtprotoUploader.IDLE
