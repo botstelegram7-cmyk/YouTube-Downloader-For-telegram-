@@ -7,8 +7,9 @@ audio track — delivered straight into the chat.
   real streams and downloads them with parallel range workers. No yt-dlp.
 * **Delivery:** FFmpeg muxes and verifies the result, so the file always plays: real
   dimensions, a duration, a generated thumbnail, `supports_streaming` and a clean caption.
-* **Large files:** up to **2000 MB** per file through a Telegram user session (MTProto), or
-  4000 MB if that account has Premium. No second service to host.
+* **Large files:** up to **2000 MB** per file over MTProto, Telegram's own protocol —
+  authorised by your bot token plus `api_id`/`api_hash`. No second account, no phone number,
+  no login code, no session string.
 * **Buttons that say something:** quality choices come from the video's real streams, are
   colour-coded (green = best, blue = alternatives, red = cancel) and are never invented.
 
@@ -69,38 +70,40 @@ Minimum viable environment:
 
 ## Large files, honestly
 
-The number that matters is what Telegram will accept — and it depends entirely on *who* is
-uploading:
+Two things decide how big a file can be, and neither of them is this application:
+
+1. **Telegram's ceiling for the transport** (it is a protocol limit, not a policy knob)
+2. **Your host's disk** (a hosting constraint, reported separately)
 
 | Route | Ceiling per file | Needs |
 |---|---|---|
 | Cloud Bot API (default) | **50 MB** | nothing |
-| **User session (MTProto)** — recommended | **2000 MB**, 4000 MB with Premium | `api_id`, `api_hash`, a session string |
+| **MTProto with your bot token** — recommended | **2000 MB** | `api_id` + `api_hash` |
 | Self-hosted Bot API server (`--local`) | 2000 MB | a second service + ~2× disk |
 
-The recommended route needs no extra service:
-
-```bash
-python scripts/make_session.py        # once, on your own machine: asks for a login code
-```
-
-Then set the three values it prints:
+There is **no `MAX_UPLOAD_MB`**: nothing here caps a download or an upload, and no setting can
+raise Telegram's own ceiling. What the bot *can* change is which protocol it uses — and the
+recommended route needs no account, no phone number and no login code:
 
 ```dotenv
 TELEGRAM_API_ID=1234567
 TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
-TELEGRAM_SESSION_STRING=BQ...
 ```
 
-From then on the bot uploads big files **through that account** and delivers them to the user
-with a server-side copy, so the message still comes from the bot, carries the caption, and no
-bytes travel twice. Files under the Bot API limit keep going through the normal API.
+Those two values identify *your Telegram application* (from
+[my.telegram.org](https://my.telegram.org) → *API development tools*); the `BOT_TOKEN` you
+already have authenticates the bot. With them set, files over 50 MB go out over **MTProto**,
+Telegram's own protocol, reaching **2000 MB per file** — the maximum a bot can ever send.
+(Telegram Premium's 4 GB is for *people*, not bots, and this bot will not pretend otherwise.)
 
-You can set `MAX_UPLOAD_MB=1500` once a session exists; a value above what the transport can
-actually do is **clamped with a warning** rather than treated as an error — a misconfigured
-ceiling must never take a working bot offline.
+Small files keep using the Bot API, so nothing changes for the common case. `/limits`,
+`/health`, the startup banner and `python main.py --check` all report the ceiling the
+deployment really has.
 
-## Commands
+**4000 MB?** Only a *user* account with Premium can, which would mean storing a login session
+for a second account. This bot does not do that.
+
+## Commands## Commands
 
 | Command | What it does |
 |---|---|
@@ -121,11 +124,10 @@ Everything has a default; `.env.example` documents all of it. The ones people ac
 | `BOT_TOKEN` | — | **required** |
 | `OWNER_USER_ID` | `0` | `0` leaves the bot open to anyone |
 | `WEBHOOK_URL` | *(empty)* | empty → long polling |
-| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | — | [my.telegram.org](https://my.telegram.org); used for big uploads |
-| `TELEGRAM_SESSION_STRING` | — | from `scripts/make_session.py`; treat it like a password |
-| `MT_PREMIUM_ACCOUNT` | `0` | `1` only if that account really has Premium (4000 MB) |
-| `UPLOAD_TRANSPORT` | `auto` | `auto`, `bot` (never use the session) or `mtproto` |
-| `MAX_UPLOAD_MB` | `0` | `0` = the transport's own ceiling; higher values are clamped |
+| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | — | [my.telegram.org](https://my.telegram.org); unlocks 2000 MB uploads over MTProto |
+| `UPLOAD_TRANSPORT` | `auto` | `auto`, `bot` (never use MTProto) or `mtproto` |
+| `MT_CONNECTIONS` | `4` | parallel connections per upload (max 8) |
+| `MIN_FREE_DISK_MB` | `256` | disk headroom kept before a job starts |
 | `MAX_DURATION_MINUTES` | `0` | `0` = unlimited; refuses longer videos before downloading |
 | `DEFAULT_QUALITY` | `720p` | the quality highlighted in green; `best` for the maximum |
 | `TYPETUBE_API_KEY` | *(empty)* | lifts the cluster's quota and unlocks Hi-Fi audio |
@@ -145,17 +147,17 @@ Telegram update ─▶ bot/handlers/links.py     validate + canonicalise the You
    button press  ─▶ bot/jobs.py               one job per user, cancellable, temp dirs
                  ─▶ bot/download.py           download ──▶ TypeTube CLI (streamed progress)
                                               mux/faststart/thumbnail ──▶ bot/ffmpeg.py
-                 ─▶ bot/upload.py             Bot API  (small files)
-                                              MTProto    (big files: session upload + copy)
+                 ─▶ bot/upload.py             Bot API  (small files, ≤50 MB)
+                                              MTProto    (big files, up to 2000 MB)
 ```
 
 | Module | Responsibility |
 |---|---|
-| `config.py` | every setting, its default, and the clamping rules |
+| `config.py` | every setting, its default, and the capability each transport really has |
 | `bot/typetube.py` | the engine: resolve, download, progress parsing, track cache |
-| `bot/download.py` | download → verify → faststart → thumbnail → size guard |
+| `bot/download.py` | download → verify → faststart → thumbnail, then check the file against Telegram |
 | `bot/upload.py` | delivery, choosing the transport per file |
-| `bot/mtproto.py` | the Pyrofork user session that carries large uploads |
+| `bot/mtproto.py` | the Pyrogram **bot** client that carries large uploads over MTProto |
 | `bot/jobs.py` | job lifecycle: one per user, cancel, cleanup, progress |
 | `bot/keyboards.py`, `bot/texts.py` | buttons and every user-facing string |
 | `bot/process.py` | process runners with timeouts, cancellation and streaming output |
@@ -181,21 +183,24 @@ python scripts/e2e_local.py     # whole pipeline against a mock Bot API and a st
 
 ## Limits and caveats
 
-* **50 MB without a session**, 2000 MB with one (4000 MB on a Premium account). The bot never
-  states a ceiling it cannot honour — `/limits` computes it from the active transport.
+* **Telegram decides the ceiling; this bot never invents one.** The Bot API stops bots at
+  50 MB; MTProto with the same bot token reaches 2000 MB; a self-hosted local Bot API server
+  also reaches 2000 MB. 4000 MB is a Premium *user* privilege, so the bot does not offer it.
+  `/limits` always reports the number the active transport actually has.
 * **YouTube only.** The engine treats anything else as a search query, so non-YouTube links
   are refused up front with an explanation rather than silently resolved to the wrong video.
 * **Whatever the cluster can reach.** Region-locked, private or removed videos fail with a
   plain explanation; uploads are subject to Telegram's own rate limits.
-* **Disk and RAM.** Each job needs room for the file plus its remux; a 2 GB delivery on a
-  512 MB free tier will not end well.
+* **Disk and RAM.** Downloads stream to disk, never through RAM, and each job needs room for
+  the file plus its remux. `MIN_FREE_DISK_MB` (default 256) keeps a floor: a job that would
+  cross it is refused up front, and partial files are always deleted.
 * **Respect copyright.** Download what you own or are allowed to save.
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | BotFather setup, Docker hosts, the user session for big uploads, day-two operations |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | BotFather setup, Docker hosts, enabling uploads over 50 MB, day-two operations |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | module-by-module walkthrough and design decisions |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | what each error means and how to fix it |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | how to run the checks before pushing |

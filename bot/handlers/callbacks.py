@@ -31,7 +31,7 @@ async def quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     rt = runtime(context)
     track = rt.tracks.get(token, user_id=user.id)
-    options = build_options(track, rt.settings, upload_limit_bytes=rt.settings.upload_limit_bytes) if track else []
+    options = build_options(track, rt.settings, capability_bytes=rt.settings.upload_capability_bytes) if track else []
     option = find_option(options, key) if track else None
 
     if track is None or option is None:

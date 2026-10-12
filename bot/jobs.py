@@ -29,6 +29,7 @@ from bot import texts
 from bot.download import DownloadResult, ProgressUpdate, download_media
 from bot.errors import (
     BotError,
+    DiskSpaceError,
     DownloadCancelled,
     DownloadError,
     MissingDependency,
@@ -258,6 +259,9 @@ class JobManager:
         except TooLargeError as exc:
             self.failed += 1
             await self._finish_too_large(job, exc)
+        except DiskSpaceError as exc:
+            self.failed += 1
+            await self._finish_error(job, texts.job_failed(exc.reason))
         except (DownloadError, ProbeError, UploadError, MissingDependency) as exc:
             self.failed += 1
             await self._finish_error(job, texts.job_failed(exc.reason))
@@ -403,7 +407,7 @@ class JobManager:
 
         reply_markup = None
         if job.track is not None:
-            options = build_options(job.track, self.settings, upload_limit_bytes=self.settings.upload_limit_bytes)
+            options = build_options(job.track, self.settings, capability_bytes=self.settings.upload_capability_bytes)
             smaller = smaller_video_options(options, job.option)
             if smaller and job.token:
                 reply_markup = retry_keyboard(smaller, job.token)

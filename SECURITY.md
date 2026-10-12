@@ -37,9 +37,10 @@ Nothing user-specific and nothing permanent:
 * **Secrets** are read from environment variables or a mounted file and are never written to
   disk, never logged, and never included in error messages. `python main.py --print-config`
   is covered by a test asserting the token cannot appear in its output.
-* **The session string** is a full login for the upload account: it lives only in the
-  environment, is never logged, and should be treated like the bot token. Least privilege: use
-  a dedicated account and revoke the session from Telegram's *Devices* screen if it leaks.
+* **No login session exists to steal.** Large uploads run over MTProto authorised by the bot
+  token, so the bot holds no user account, no phone number and no session string. The only
+  credentials are `BOT_TOKEN` and, if configured, `TELEGRAM_API_ID`/`TELEGRAM_API_HASH`, which
+  identify the application rather than an account. Revoke a leaked bot token from @BotFather.
 * **Downloaded media** is read-only input for the muxer and is never copied into a job
   directory or sent anywhere.
 

@@ -52,17 +52,17 @@ main.py ─ CLI and entry point
 
 | Module | Responsibility | Depends on |
 |---|---|---|
-| `config.py` | The whole configuration surface: a frozen `Settings` dataclass, `load_settings()`/`SETTINGS`, range validation, derived values (`upload_limit_mb`, `runs_webhook`, `api_mode`) and the startup summary. Never imports the bot. | stdlib only |
+| `config.py` | The whole configuration surface: a frozen `Settings` dataclass, `load_settings()`/`SETTINGS`, range validation, derived values (`upload_capability_mb`, `transport`, `min_free_disk_bytes`, `runs_webhook`, `api_mode`) and the startup summary. Never imports the bot. | stdlib only |
 | `bot/runner.py` | Process lifecycle: `initialize → on_startup → start → (web server + set_webhook \| polling) → wait for SIGTERM/SIGINT → graceful shutdown`. | app, web |
 | `bot/app.py` | Builds the PTB `Application`: handler registration, `concurrent_updates(True)`, HTTP timeouts, `base_url`/`base_file_url` for a local Bot API server, optional rate limiter, the startup introduction and the command menu. | handlers, JobManager |
 | `bot/web.py` | The aiohttp app: `/` service card, `/health` + `/healthz` (503 without FFmpeg), `/stats` job snapshot, `POST /<WEBHOOK_PATH>` (secret check, 2 MB payload cap, `Update.de_json`, queue put, immediate 200). | probe, jobs |
 | `bot/handlers/` | Thin adapters. `commands.py` (`/start /help /status /cancel /limits /id /about`), `links.py` (URL extraction → probe → keyboard), `callbacks.py` (`dl:`/`cancel:`/`abort:`), `errors.py` (last-resort handler + `RetryAfter`/`Forbidden` handling). | everything below |
 | `bot/jobs.py` | `Job` + `JobManager`: one job per user, auto-cancel, `Semaphore` queue, the download→mux→thumbnail→upload pipeline, progress rendering, cleanup, counters. | download, upload, progress |
-| `bot/download.py` | Download → verify → faststart → thumbnail → size guard: drives the engine, then proves the result with ffprobe. | typetube, ffmpeg, process |
+| `bot/download.py` | Download → verify → faststart → thumbnail: drives the engine, then proves the result with ffprobe and checks it against what the transport can send. | typetube, ffmpeg, process |
 | `bot/upload.py` | `sendVideo`/`sendAudio`/`sendDocument`: caption, thumbnail, `supports_streaming`, dimension/duration metadata, byte-accurate upload progress, container-refusal fallback. | progress |
 | `bot/ffmpeg.py` | ffprobe wrapper, `+faststart` detection and remux, thumbnail generation, audio conversion, version reporting. | process |
 | `bot/typetube.py` | The engine: `resolve --json`, streamed and cancellable downloads, progress parsing, `Track`/`Stream`, `TrackCache` (8-char tokens in `callback_data`). | process |
-| `bot/mtproto.py` | The Pyrofork user session that carries uploads above the Bot API ceiling. | upload |
+| `bot/mtproto.py` | The Pyrogram **bot** client over MTProto (bot token + api_id/hash) that carries uploads above the Bot API ceiling, straight into the user's chat. | upload |
 | `bot/urls.py` | Link extraction, YouTube-only validation and canonicalisation. | — |
 | `bot/qualities.py` | Turns a probed `info` dict into the quality buttons: which heights exist, size estimates (`≈` when derived from bitrate), format selectors. Pure functions — heavily unit-tested. | — |
 | `bot/progress.py` | `StatusReporter`: throttled, idempotent status edits with a live cancel button; `UploadProgressFile`: a file wrapper that counts uploaded bytes. | — |

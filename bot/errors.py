@@ -41,6 +41,26 @@ class UploadError(BotError):
     reason = "The upload to Telegram failed."
 
 
+class DiskSpaceError(BotError):
+    """The workspace ran out of room — a property of the host, not a policy on file size."""
+
+    def __init__(self, free_bytes: int, needed_mb: int | None = None, *, during: str = "") -> None:
+        self.free_bytes = free_bytes
+        self.needed_mb = needed_mb
+        where = f" while {during}" if during else ""
+        if needed_mb:
+            self.reason = (
+                f"The server is low on disk: {free_bytes / 1024 / 1024:.0f} MB free, and {needed_mb} MB is "
+                f"kept in reserve. Nothing was downloaded{where}."
+            )
+        else:
+            self.reason = (
+                f"The server ran out of disk space{where} ({free_bytes / 1024 / 1024:.0f} MB free). "
+                "The partial file has been removed."
+            )
+        super().__init__(self.reason)
+
+
 class UploadCancelled(BotError):
     reason = "Cancelled during upload."
 

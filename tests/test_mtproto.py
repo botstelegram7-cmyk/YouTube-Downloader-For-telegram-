@@ -1,8 +1,9 @@
-"""The MTProto upload path: when it is used, and how it reports progress.
+"""The MTProto upload transport: what it is, when it is chosen, and how it behaves.
 
-No network is touched. The Pyrofork client is replaced by a fake, which is enough to pin
-the behaviour that matters: the transport decision, the progress bridge, and the fact that
-a delivery failure is reported instead of silently dropping the file.
+No network and no credentials are involved: the Pyrogram client is replaced by a fake. What
+is pinned down here is the architecture — that the transport is authorised by the *bot token*
+alone (no user session anywhere), that it is chosen only when the Bot API cannot carry the
+file, and that progress and cancellation both work.
 """
 
 from __future__ import annotations
@@ -16,19 +17,15 @@ from telegram.error import BadRequest
 from bot.download import DownloadResult
 from bot.errors import UploadCancelled, UploadError
 from bot.ffmpeg import MediaProbe
-from bot.mtproto import MtprotoUploader, UploadedHandle
+from bot.mtproto import MtprotoUploader
 from bot.upload import send_media
-from config import load_settings
+from config import MB, load_settings
 
 TOKEN = "123456789:" + "A" * 35
-SESSION = {
-    "TELEGRAM_API_ID": "1234567",
-    "TELEGRAM_API_HASH": "0123456789abcdef0123456789abcdef",
-    "TELEGRAM_SESSION_STRING": "BQ" + "x" * 40,
-}
+API_KEY = {"TELEGRAM_API_ID": "1234567", "TELEGRAM_API_HASH": "0123456789abcdef0123456789abcdef"}
 
-WITH_SESSION = load_settings({"BOT_TOKEN": TOKEN, **SESSION})
-WITHOUT_SESSION = load_settings({"BOT_TOKEN": TOKEN})
+WITH_MT = load_settings({"BOT_TOKEN": TOKEN, **API_KEY})
+WITHOUT_MT = load_settings({"BOT_TOKEN": TOKEN})
 
 
 def media_result(path: Path, *, size: int) -> DownloadResult:
@@ -56,42 +53,44 @@ def media_result(path: Path, *, size: int) -> DownloadResult:
         thumbnail=None,
         faststart=True,
         probe=probe,
-        artist="",
         source_url="https://www.youtube.com/watch?v=abcdefghijk",
     )
 
 
 class FakeUploader:
-    """Stands in for the Pyrofork client."""
+    """Stands in for the Pyrogram bot client."""
 
     def __init__(self) -> None:
         self.ready = True
-        self.uploaded: list[dict] = []
-        self.deleted: list[UploadedHandle] = []
+        self.sent: list[dict] = []
         self.fail_with: Exception | None = None
 
-    async def upload(self, path: Path, **kwargs) -> UploadedHandle:
-        self.uploaded.append({"path": path, **kwargs})
+    def reason(self) -> str:
+        return ""
+
+    @property
+    def capability_mb(self) -> int:
+        return 2000
+
+    async def send(self, path: Path, **kwargs):
+        from bot.mtproto import UploadedHandle
+
+        self.sent.append({"path": path, **kwargs})
         if self.fail_with is not None:
             raise self.fail_with
         return UploadedHandle(
-            chat_id=123456789,
+            chat_id=kwargs["chat_id"],
             message_id=4242,
             size_bytes=path.stat().st_size,
-            file_id="session-file-id",
-            account_id=999,
+            file_id="mt-file-id",
             kind=kwargs.get("kind", "video"),
             filename=path.name,
         )
-
-    async def delete(self, handle: UploadedHandle) -> None:
-        self.deleted.append(handle)
 
 
 class FakeBot:
     def __init__(self) -> None:
         self.calls: list[str] = []
-        self.copy_error: Exception | None = None
 
     async def send_chat_action(self, **kwargs) -> None:
         self.calls.append("send_chat_action")
@@ -108,43 +107,60 @@ class FakeBot:
         self.calls.append("send_document")
         return object()
 
-    async def copy_message(self, **kwargs):
-        self.calls.append("copy_message")
-        if self.copy_error is not None:
-            raise self.copy_error
-        return None
 
-    async def forward_message(self, **kwargs):
-        self.calls.append("forward_message")
-        return None
-
-
-# -- availability ------------------------------------------------------------ #
-def test_missing_credentials_are_named_one_by_one():
-    uploader = MtprotoUploader(WITHOUT_SESSION)
+# -- the authentication model ------------------------------------------------- #
+def test_without_the_api_key_pair_the_transport_is_off_and_says_what_is_missing():
+    uploader = MtprotoUploader(WITHOUT_MT)
     assert uploader.ready is False
     reason = uploader.reason()
-    assert "TELEGRAM_API_ID" in reason
-    assert "TELEGRAM_API_HASH" in reason
-    assert "TELEGRAM_SESSION_STRING" in reason
-    assert "make_session.py" in reason
+    assert "TELEGRAM_API_ID" in reason and "TELEGRAM_API_HASH" in reason
+    assert "No phone number or login code" in reason
 
 
-def test_a_complete_session_is_ready():
-    uploader = MtprotoUploader(WITH_SESSION)
+def test_with_the_api_key_pair_the_transport_is_ready_with_no_session_string():
+    uploader = MtprotoUploader(WITH_MT)
     assert uploader.ready is True
     assert uploader.reason() == ""
-    assert uploader.upload_cap_mb == 2000
+    assert uploader.capability_mb == 2000
+    assert uploader.capability_bytes == 2000 * MB
 
 
-async def test_uploading_without_credentials_fails_before_any_network_call():
+async def test_sending_without_credentials_fails_before_any_network_call():
     with pytest.raises(UploadError):
-        await MtprotoUploader(WITHOUT_SESSION).upload(Path("/nonexistent.mp4"), kind="video")
+        await MtprotoUploader(WITHOUT_MT).send(Path("/nonexistent.mp4"), chat_id=1, kind="video")
 
 
-# -- progress and cancellation ----------------------------------------------- #
+async def test_the_client_is_built_for_a_bot_and_writes_no_session_file(monkeypatch):
+    """The whole point: bot token + api_id/api_hash, in-memory, no phone, no session file."""
+    captured: dict = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        async def start(self):
+            return self
+
+        async def stop(self):
+            return None
+
+    import pyrogram
+
+    monkeypatch.setattr(pyrogram, "Client", FakeClient)
+    uploader = MtprotoUploader(WITH_MT)
+    await uploader.start()
+
+    assert captured["bot_token"] == TOKEN
+    assert captured["api_id"] == 1234567
+    assert captured["api_hash"] == API_KEY["TELEGRAM_API_HASH"]
+    assert captured["in_memory"] is True, "no session file may be written to disk"
+    assert captured["no_updates"] is True, "the Bot API side owns the conversation"
+    assert "session_string" not in captured, "a user session must never be used"
+
+
+# -- progress and cancellation ------------------------------------------------ #
 def test_progress_is_bridged_with_percentage_and_speed():
-    uploader = MtprotoUploader(WITH_SESSION)
+    uploader = MtprotoUploader(WITH_MT)
     seen = []
     callback = uploader._progress(seen.append, None, "video.mp4")
 
@@ -159,20 +175,20 @@ def test_progress_is_bridged_with_percentage_and_speed():
 
 
 def test_a_cancelled_upload_aborts_from_inside_the_progress_callback():
-    uploader = MtprotoUploader(WITH_SESSION)
+    uploader = MtprotoUploader(WITH_MT)
     cancel_event = asyncio.Event()
     callback = uploader._progress(None, cancel_event, "video.mp4")
 
     callback(10, 100)  # fine while running
 
     cancel_event.set()
-    with pytest.raises(Exception) as error:  # _Aborted, kept private on purpose
+    with pytest.raises(Exception) as error:
         callback(20, 100)
     assert type(error.value).__name__ == "_Aborted"
 
 
-# -- routing ----------------------------------------------------------------- #
-async def test_small_files_still_go_through_the_bot_api(tmp_path):
+# -- routing: small files stay on the Bot API --------------------------------- #
+async def test_small_files_go_through_the_bot_api_even_when_mtproto_is_ready(tmp_path):
     path = tmp_path / "small.mp4"
     path.write_bytes(b"\x00" * 4096)
     bot, uploader = FakeBot(), FakeUploader()
@@ -180,17 +196,17 @@ async def test_small_files_still_go_through_the_bot_api(tmp_path):
     outcome = await send_media(
         bot=bot,  # type: ignore[arg-type]
         chat_id=42,
-        result=media_result(path, size=4 * 1024 * 1024),
-        settings=WITH_SESSION,
+        result=media_result(path, size=4 * MB),
+        settings=WITH_MT,
         uploader=uploader,
     )
 
     assert outcome.method == "sendVideo"
     assert "send_video" in bot.calls
-    assert uploader.uploaded == [], "a small file must not wake the session"
+    assert uploader.sent == [], "a small file must not wake MTProto"
 
 
-async def test_big_files_travel_through_the_session_and_are_copied(tmp_path):
+async def test_big_files_go_through_mtproto_and_are_sent_straight_to_the_user(tmp_path):
     path = tmp_path / "big.mp4"
     path.write_bytes(b"\x00" * 4096)
     bot, uploader = FakeBot(), FakeUploader()
@@ -198,38 +214,59 @@ async def test_big_files_travel_through_the_session_and_are_copied(tmp_path):
     outcome = await send_media(
         bot=bot,  # type: ignore[arg-type]
         chat_id=42,
-        result=media_result(path, size=600 * 1024 * 1024),
-        settings=WITH_SESSION,
+        result=media_result(path, size=900 * MB),
+        settings=WITH_MT,
         uploader=uploader,
         source_url="https://www.youtube.com/watch?v=abcdefghijk",
     )
 
-    assert outcome.method == "mtproto-copy"
     assert outcome.via_mtproto is True
-    assert len(uploader.uploaded) == 1
-    assert "copy_message" in bot.calls
-    assert uploader.deleted, "the storage copy should be cleaned up after delivery"
+    assert outcome.method == "mtproto-video"
+    assert len(uploader.sent) == 1
+    sent = uploader.sent[0]
+    assert sent["chat_id"] == 42, "the bot sends directly to the user — no relay or copy step"
+    assert sent["kind"] == "video"
+    assert bot.calls == [], "the Bot API is not involved at all"
 
 
-async def test_a_failed_copy_falls_back_to_forwarding(tmp_path):
-    path = tmp_path / "big.mp4"
+async def test_a_file_beyond_telegram_s_own_ceiling_is_refused_with_telegram_s_number(tmp_path):
+    path = tmp_path / "huge.mp4"
     path.write_bytes(b"\x00" * 4096)
-    bot, uploader = FakeBot(), FakeUploader()
-    bot.copy_error = BadRequest("copy refused")
+    uploader = FakeUploader()
+    uploader.fail_with = UploadError("above Telegram's 2000 MB ceiling")
+
+    with pytest.raises(UploadError):
+        await send_media(
+            bot=FakeBot(),  # type: ignore[arg-type]
+            chat_id=42,
+            result=media_result(path, size=2500 * MB),
+            settings=WITH_MT,
+            uploader=uploader,
+        )
+
+
+async def test_a_broken_mtproto_route_does_not_fail_a_small_file(tmp_path):
+    """If the large-file transport is down, a file that fits the Bot API still gets delivered."""
+    path = tmp_path / "small.mp4"
+    path.write_bytes(b"\x00" * 4096)
+    bot = FakeBot()
+    uploader = FakeUploader()
+    uploader.fail_with = UploadError("connection refused")
+    settings = load_settings({"BOT_TOKEN": TOKEN, **API_KEY, "UPLOAD_TRANSPORT": "mtproto"})
 
     outcome = await send_media(
         bot=bot,  # type: ignore[arg-type]
         chat_id=42,
-        result=media_result(path, size=600 * 1024 * 1024),
-        settings=WITH_SESSION,
+        result=media_result(path, size=4 * MB),
+        settings=settings,
         uploader=uploader,
     )
 
-    assert outcome.method == "mtproto-forward"
-    assert "forward_message" in bot.calls
+    assert outcome.method == "sendVideo"
+    assert "send_video" in bot.calls
 
 
-async def test_a_big_file_without_a_session_is_refused_with_advice(tmp_path):
+async def test_a_big_file_with_no_mtproto_configured_explains_the_two_settings(tmp_path):
     path = tmp_path / "big.mp4"
     path.write_bytes(b"\x00" * 4096)
 
@@ -237,15 +274,17 @@ async def test_a_big_file_without_a_session_is_refused_with_advice(tmp_path):
         await send_media(
             bot=FakeBot(),  # type: ignore[arg-type]
             chat_id=42,
-            result=media_result(path, size=600 * 1024 * 1024),
-            settings=WITHOUT_SESSION,
+            result=media_result(path, size=600 * MB),
+            settings=WITHOUT_MT,
             uploader=None,
         )
 
-    assert "TELEGRAM_SESSION_STRING" in error.value.reason
+    reason = error.value.reason
+    assert "TELEGRAM_API_ID" in reason and "TELEGRAM_API_HASH" in reason
+    assert "no user account" in reason.lower()
 
 
-async def test_cancellation_during_upload_propagates(tmp_path):
+async def test_cancellation_during_the_upload_propagates(tmp_path):
     path = tmp_path / "big.mp4"
     path.write_bytes(b"\x00" * 4096)
     uploader = FakeUploader()
@@ -255,7 +294,30 @@ async def test_cancellation_during_upload_propagates(tmp_path):
         await send_media(
             bot=FakeBot(),  # type: ignore[arg-type]
             chat_id=42,
-            result=media_result(path, size=600 * 1024 * 1024),
-            settings=WITH_SESSION,
+            result=media_result(path, size=600 * MB),
+            settings=WITH_MT,
             uploader=uploader,
         )
+
+
+async def test_bot_api_container_failure_still_falls_back_to_a_document(tmp_path, monkeypatch):
+    """The Bot API path keeps its old safety net."""
+    path = tmp_path / "small.mp4"
+    path.write_bytes(b"\x00" * 4096)
+
+    class PickyBot(FakeBot):
+        async def send_video(self, **kwargs):
+            self.calls.append("send_video")
+            raise BadRequest("Bad Request: VIDEO_FILE_INVALID")
+
+    bot = PickyBot()
+    outcome = await send_media(
+        bot=bot,  # type: ignore[arg-type]
+        chat_id=42,
+        result=media_result(path, size=4 * MB),
+        settings=WITHOUT_MT,
+        uploader=None,
+    )
+
+    assert outcome.method == "sendDocument"
+    assert "send_document" in bot.calls

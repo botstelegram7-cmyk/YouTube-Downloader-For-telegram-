@@ -63,7 +63,7 @@ def _video_option(height: int | None, label: str, stream: Stream, *, key: str) -
     )
 
 
-def _audio_option(track: Track, settings: Settings, upload_limit_bytes: int | None = None) -> QualityOption | None:
+def _audio_option(track: Track, settings: Settings, capability_bytes: int | None = None) -> QualityOption | None:
     stream = track.best_audio()
     if stream is None:
         return None
@@ -72,9 +72,9 @@ def _audio_option(track: Track, settings: Settings, upload_limit_bytes: int | No
     kbps = f"{round(bitrate / 1000)} kbps" if bitrate else "audio"
     label = f"🎵 Audio · M4A · {kbps}"
     description = f"{kbps} {stream.codec or 'audio'}"
-    # Honest note when the track is simply too long for this deployment's ceiling.
-    if upload_limit_bytes and size and size > upload_limit_bytes:
-        description += " · longer than the upload limit allows"
+    # Honest note when the track is longer than what the transport can actually carry.
+    if capability_bytes and size and size > capability_bytes:
+        description += " · longer than Telegram will accept from this bot"
     return QualityOption(
         key="audio",
         label=label,
@@ -101,7 +101,7 @@ def video_heights(track: Track) -> list[int]:
     return sorted({stream.height for stream in pool if stream.height})
 
 
-def build_options(track: Track, settings: Settings, *, upload_limit_bytes: int | None = None) -> list[QualityOption]:
+def build_options(track: Track, settings: Settings, *, capability_bytes: int | None = None) -> list[QualityOption]:
     """Every option to offer for ``track``: best, the real heights, then audio."""
     options: list[QualityOption] = []
     heights = video_heights(track)
@@ -121,7 +121,7 @@ def build_options(track: Track, settings: Settings, *, upload_limit_bytes: int |
             label = f"{height}p" + (f" · {stream.resolution}" if stream.resolution else "")
             options.append(_video_option(height, label, stream, key=f"{height}p"))
 
-    audio = _audio_option(track, settings, upload_limit_bytes)
+    audio = _audio_option(track, settings, capability_bytes)
     if audio is not None:
         options.append(audio)
 

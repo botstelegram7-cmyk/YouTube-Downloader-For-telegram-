@@ -1,19 +1,23 @@
-"""Delivering large files through a Telegram *user session* (MTProto, via Pyrofork).
+"""Telegram's MTProto API as an upload transport — authorised with the *bot token*.
 
-The Bot API caps a bot's uploads at 50 MB, and a self-hosted Bot API server needs another
-service to run. A user session sidesteps both: MTProto user accounts may upload **2000 MB**
-per file (4000 MB with Telegram Premium), so the bot uploads through the session and then
-hands the file over with the Bot API — which copies it *server-side*, so no bytes cross the
-network twice and no "Forwarded from" header appears:
+Why this exists
+---------------
+The HTTP Bot API caps a bot's uploads at 50 MB. MTProto, the protocol every official client
+speaks, allows **2000 MB per file for bots** (4000 MB is a Premium *user* privilege, which a
+bot cannot have). Pyrogram can sign in as a bot, so the ceiling can be raised without a
+personal account, a phone number, a login code or a session string:
 
-    1. session.send_video(...)      → uploads the file into the bot's own chat
-    2. bot.copy_message(...)        → delivers it to the user, as the bot
+* ``api_id`` / ``api_hash`` identify the *application* (from https://my.telegram.org);
+* ``BOT_TOKEN`` identifies the *account* — the same token the rest of the bot already uses.
 
-Only credentials are needed: ``TELEGRAM_API_ID``, ``TELEGRAM_API_HASH`` and a session
-string from ``scripts/make_session.py``. Nothing extra has to be hosted.
+That distinction matters: api_id/api_hash alone authenticate nothing. Pyrogram needs all
+three, and with them it authorises over MTProto directly, with no phone step.
 
-Everything here degrades politely: without credentials the uploader reports why it is not
-ready, and the caller falls back to the Bot API paths in :mod:`bot.upload`.
+Because this client *is* the bot, the file is sent straight to the user's chat — no relay
+chat, no ``copy_message``, no second pass over the network.
+
+Everything degrades politely: without credentials the uploader explains why it is off, and
+:mod:`bot.upload` falls back to the Bot API paths.
 """
 
 from __future__ import annotations
@@ -26,60 +30,58 @@ from pathlib import Path
 
 from bot.download import ProgressUpdate
 from bot.errors import UploadCancelled, UploadError
-from config import VERSION, Settings
+from config import MB, VERSION, Settings
 
 log = logging.getLogger("bot.mtproto")
 
 
 class _Aborted(Exception):
-    """Raised inside Pyrofork's progress callback to stop an upload at once."""
+    """Raised inside Pyrogram's progress callback to stop an upload at once."""
 
 
 @dataclass
 class UploadedHandle:
-    """Where the user session left the uploaded file."""
+    """A file that MTProto has delivered."""
 
     chat_id: int
     message_id: int
     size_bytes: int
     file_id: str
-    account_id: int
-    kind: str  # "video" | "audio"
+    kind: str  # "video" | "audio" | "document"
     filename: str = ""
 
 
 class MtprotoUploader:
-    """A lazily started Pyrofork client that uploads for the bot.
+    """A Pyrogram *bot* client used only for sending files.
 
-    One client is shared by every job: connecting is expensive and Telegram counts
-    sessions, so it is started once at boot and stopped at shutdown.
+    One client serves every job: connecting is expensive and Telegram counts sessions, so it
+    is started once at boot and stopped at shutdown. It reads no updates (``no_updates``) —
+    the Bot API side of the bot owns the conversation.
     """
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._client = None
         self._lock = asyncio.Lock()
-        self._account: dict | None = None
+        self._me: dict | None = None
 
     # -- availability -------------------------------------------------------
     def reason(self) -> str:
-        """Why the session cannot be used, or ``""`` when it is ready."""
+        """Why MTProto is unusable, or ``""`` when it is ready."""
         missing = []
         if not self.settings.api_id:
             missing.append("TELEGRAM_API_ID")
         if not self.settings.api_hash:
             missing.append("TELEGRAM_API_HASH")
-        if not self.settings.session_string:
-            missing.append("TELEGRAM_SESSION_STRING")
+        if not self.settings.bot_token:
+            missing.append("BOT_TOKEN")
         if missing:
             return (
                 "MTProto upload is not configured (missing "
                 + ", ".join(missing)
-                + "). Get the first two from https://my.telegram.org and generate the session "
-                "string with `python scripts/make_session.py`."
+                + "). Get the two API values from https://my.telegram.org/ → API development tools; "
+                "BOT_TOKEN is the token you already use. No phone number or login code is involved."
             )
-        if not self.settings.bot_id:
-            return "BOT_TOKEN does not contain a usable bot id, so there is nowhere to upload to."
         return ""
 
     @property
@@ -87,14 +89,19 @@ class MtprotoUploader:
         return not self.reason()
 
     @property
-    def upload_cap_mb(self) -> int:
-        return self.settings.mtproto_cap_mb
+    def capability_mb(self) -> int:
+        """Telegram's per-file ceiling for a bot over MTProto."""
+        return self.settings.mtproto_capability_mb
+
+    @property
+    def capability_bytes(self) -> int:
+        return self.capability_mb * MB
 
     # -- lifecycle ----------------------------------------------------------
     async def start(self) -> bool:
-        """Connect the session. Returns True when it is usable."""
+        """Authorise and connect. Returns True when the transport is usable."""
         if not self.ready:
-            log.info("MTProto upload disabled: %s", self.reason())
+            log.info("MTProto upload unavailable: %s", self.reason())
             return False
 
         from pyrogram import Client
@@ -103,26 +110,30 @@ class MtprotoUploader:
             if self._client is not None:
                 return True
             client = Client(
-                name=":memory:",
+                name="ytbot-uploader",  # never written to disk: the session lives in memory
                 api_id=self.settings.api_id,
                 api_hash=self.settings.api_hash,
-                session_string=self.settings.session_string,
-                in_memory=True,
-                no_updates=True,  # nothing is read from this session
+                bot_token=self.settings.bot_token,
+                in_memory=True,  # nothing to persist, nothing to leak
+                no_updates=True,  # the Bot API side owns updates
                 max_concurrent_transmissions=self.settings.mt_connections,
                 device_model="YouTube Downloader Bot",
                 app_version=VERSION,
             )
             try:
-                await client.start()
+                await client.start()  # signs in as the bot; no phone, no code
             except Exception as exc:
-                log.error("MTProto session could not start: %s", exc)
+                log.error("MTProto could not authorise the bot: %s", exc)
                 raise UploadError(
-                    "The Telegram session could not connect — check TELEGRAM_API_ID, TELEGRAM_API_HASH and "
-                    f"TELEGRAM_SESSION_STRING (generate it again with scripts/make_session.py). Details: {exc}"
+                    "Telegram refused the MTProto connection. Check TELEGRAM_API_ID / TELEGRAM_API_HASH "
+                    f"(they must belong to the same app you registered) and the outbound connection to "
+                    f"Telegram's data centres. Details: {exc}"
                 ) from exc
             self._client = client
-            log.info("MTProto session connected (limit %s MB per file)", self.settings.mtproto_cap_mb)
+            log.info(
+                "MTProto uploads enabled: bot session authorised, up to %s MB per file",
+                self.capability_mb,
+            )
             return True
 
     async def stop(self) -> None:
@@ -139,161 +150,191 @@ class MtprotoUploader:
         if self._client is None:
             await self.start()
         if self._client is None:
-            raise UploadError(self.reason() or "The MTProto session is not available.")
+            raise UploadError(self.reason() or "MTProto is not available.")
         return self._client
 
-    # -- account ------------------------------------------------------------
-    async def account(self) -> dict:
-        """The signed-in account: id, name, and whether it is Premium."""
-        if self._account is not None:
-            return self._account
+    async def identity(self) -> dict:
+        """Who the session is: the bot itself, with the ceiling that applies to it."""
+        if self._me is not None:
+            return self._me
         client = await self._ensure_client()
         me = await client.get_me()
-        premium = bool(getattr(me, "is_premium", False))
-        self._account = {
+        self._me = {
             "id": me.id,
-            "name": " ".join(part for part in (me.first_name, me.last_name) if part) or (me.username or ""),
             "username": me.username or "",
-            "premium": premium,
-            "phone": getattr(me, "phone_number", "") or "",
-            "cap_mb": int((getattr(me, "is_premium", False) and 4000) or self.settings.mtproto_cap_mb),
+            "name": me.first_name or "",
+            "capability_mb": self.capability_mb,
         }
         log.info(
-            "MTProto account: %s (@%s, id %s, premium=%s → up to %s MB per file)",
-            self._account["name"],
-            self._account["username"] or "-",
-            self._account["id"],
-            premium,
-            self._account["cap_mb"],
+            "MTProto session is @%s (id %s) — ceiling %s MB per file",
+            self._me["username"] or "-",
+            self._me["id"],
+            self.capability_mb,
         )
-        return self._account
+        return self._me
 
-    # -- uploading ----------------------------------------------------------
+    # -- sending ------------------------------------------------------------
     def _progress(self, on_progress, cancel_event, filename: str):
-        """Bridge Pyrofork's progress callback to the status message, with cancellation."""
+        """Bridge Pyrogram's progress callback to the status message, honouring cancellation."""
+        started = time.monotonic()
 
         def callback(current: int, total: int, *args) -> None:
             if cancel_event is not None and cancel_event.is_set():
                 raise _Aborted()
             if on_progress is None:
                 return
-            now = time.monotonic()
-            elapsed = max(0.001, now - started["at"])
+            elapsed = max(0.001, time.monotonic() - started)
             speed = current / elapsed
-            percent = min(100.0, current * 100.0 / total) if total else None
-            eta = (total - current) / speed if (total and speed > 0) else None
             on_progress(
                 ProgressUpdate(
                     phase="upload",
-                    percent=percent,
+                    percent=min(100.0, current * 100.0 / total) if total else None,
                     downloaded=current,
                     total=total or None,
                     speed=speed,
-                    eta=eta,
+                    eta=((total - current) / speed) if (total and speed > 0) else None,
                     note=f"Uploading {filename}…",
                 )
             )
 
-        started = {"at": time.monotonic()}
         return callback
 
-    async def upload(
+    def _markup(self, url: str):
+        """A Pyrogram ``Watch on YouTube`` button (the Bot API equivalent lives in keyboards)."""
+        if not url:
+            return None
+        from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        return InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Watch on YouTube", url=url)]])
+
+    async def send(
         self,
         path: Path,
         *,
+        chat_id: int,
         kind: str,
+        caption: str = "",
         title: str = "",
         artist: str = "",
         duration: float = 0.0,
         width: int = 0,
         height: int = 0,
         thumbnail: Path | None = None,
+        source_url: str = "",
+        reply_to_message_id: int | None = None,
         on_progress=None,
         cancel_event: asyncio.Event | None = None,
     ) -> UploadedHandle:
-        """Upload one file with the user session and return where it landed.
-
-        The destination is the bot's own chat (``STORAGE_CHAT_ID`` can override that), which
-        is what makes the follow-up ``copy_message`` possible.
-        """
+        """Upload one file with MTProto and send it to ``chat_id``."""
         if not self.ready:
             raise UploadError(self.reason())
 
+        size = path.stat().st_size
+        if size > self.capability_bytes:
+            raise UploadError(
+                f"This file is {size / MB:.0f} MB, above Telegram's {self.capability_mb} MB ceiling for a "
+                "bot over MTProto. Nothing in this application lowers that number — only Telegram sets it."
+            )
+
         client = await self._ensure_client()
-        target = self.settings.storage_chat_id or self.settings.bot_id
         thumb = str(thumbnail) if thumbnail is not None and Path(thumbnail).is_file() else None
         progress = self._progress(on_progress, cancel_event, path.name)
-        size = path.stat().st_size
+        markup = self._markup(source_url)
+        html = _parse_mode()
 
         from pyrogram.errors import FloodWait, RPCError
 
         try:
             if kind == "video":
                 message = await client.send_video(
-                    chat_id=target,
+                    chat_id=chat_id,
                     video=str(path),
+                    caption=caption,
+                    parse_mode=html,
                     thumb=thumb,
                     duration=int(duration) or None,
                     width=width or None,
                     height=height or None,
                     file_name=path.name,
-                    supports_streaming=True,  # so Telegram can stream it while downloading
-                    disable_notification=True,
+                    supports_streaming=True,  # Telegram can stream it while it downloads
+                    disable_notification=False,
+                    reply_to_message_id=reply_to_message_id,
+                    reply_markup=markup,
                     progress=progress,
                 )
-                file_id = getattr(message.video, "file_id", "") if message.video else ""
-            else:
+            elif kind == "audio":
                 message = await client.send_audio(
-                    chat_id=target,
+                    chat_id=chat_id,
                     audio=str(path),
+                    caption=caption,
+                    parse_mode=html,
                     thumb=thumb,
                     duration=int(duration) or None,
                     performer=(artist or "")[:64] or None,
                     title=(title or path.stem)[:64],
                     file_name=path.name,
-                    disable_notification=True,
+                    reply_to_message_id=reply_to_message_id,
+                    reply_markup=markup,
                     progress=progress,
                 )
-                file_id = getattr(message.audio, "file_id", "") if message.audio else ""
+            else:
+                message = await client.send_document(
+                    chat_id=chat_id,
+                    document=str(path),
+                    caption=caption,
+                    parse_mode=html,
+                    thumb=thumb,
+                    file_name=path.name,
+                    force_document=True,
+                    reply_to_message_id=reply_to_message_id,
+                    reply_markup=markup,
+                    progress=progress,
+                )
         except _Aborted as exc:
             raise UploadCancelled() from exc
         except FloodWait as exc:
             raise UploadError(f"Telegram asked me to wait {exc.value}s before uploading again.") from exc
         except RPCError as exc:
-            raise UploadError(f"Telegram refused the upload: {getattr(exc, 'MESSAGE', str(exc))}") from exc
+            message = getattr(exc, "MESSAGE", None) or str(exc)
+            if "TOO_BIG" in str(message).upper() or "ENTITY_TOO_LARGE" in str(message).upper():
+                raise UploadError(
+                    f"Telegram refused the file as too large for a bot over MTProto "
+                    f"({self.capability_mb} MB is the protocol ceiling). Details: {message}"
+                ) from exc
+            raise UploadError(f"Telegram refused the upload: {message}") from exc
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             raise UploadError(f"The MTProto upload failed: {exc}") from exc
 
-        account = await self.account()
+        file_id = ""
+        media = getattr(message, "video", None) or getattr(message, "audio", None) or getattr(message, "document", None)
+        if media is not None:
+            file_id = getattr(media, "file_id", "") or ""
+
         log.info(
-            "MTProto uploaded %s (%s) as %s in chat %s (%s MB)",
+            "MTProto delivered %s to chat %s as message %s (%s MB, %s)",
             path.name,
-            kind,
+            chat_id,
             message.id,
-            target,
-            f"{size / 1e6:.1f}",
+            f"{size / MB:.1f}",
+            kind,
         )
         return UploadedHandle(
-            chat_id=target,
+            chat_id=chat_id,
             message_id=message.id,
             size_bytes=size,
             file_id=file_id,
-            account_id=account["id"],
             kind=kind,
             filename=path.name,
         )
 
-    async def delete(self, handle: UploadedHandle) -> None:
-        """Remove the uploaded copy once it has been delivered (best effort)."""
-        client = self._client
-        if client is None:
-            return
-        try:
-            await client.delete_messages(chat_id=handle.chat_id, message_ids=handle.message_id)
-        except Exception as exc:
-            log.debug("Could not delete the storage message %s: %s", handle.message_id, exc)
+
+def _parse_mode():
+    """Pyrogram's HTML parse mode, imported lazily so the module stays cheap to import."""
+    from pyrogram.enums import ParseMode
+
+    return ParseMode.HTML
 
 
 __all__ = ["MtprotoUploader", "UploadedHandle"]

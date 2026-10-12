@@ -110,17 +110,21 @@ async def on_startup(application: Application) -> None:
     if uploader is not None and uploader.ready:
         try:
             await uploader.start()
-            account = await uploader.account()
+            identity = await uploader.identity()
             log.info(
-                "Large uploads enabled: session on account %s (premium=%s, up to %s MB)",
-                account["id"],
-                account["premium"],
-                account["cap_mb"],
+                "Large uploads enabled: MTProto as @%s (id %s), up to %s MB per file",
+                identity["username"] or "-",
+                identity["id"],
+                identity["capability_mb"],
             )
         except Exception as exc:
             log.error("MTProto session unavailable, large uploads disabled: %s", exc)
     elif uploader is not None:
-        log.info("Large uploads disabled: %s", uploader.reason())
+        log.info(
+            "Large uploads beyond the Bot API's %s MB are unavailable: %s",
+            settings.bot_api_capability_mb,
+            uploader.reason(),
+        )
 
     try:
         me = await application.bot.get_me()

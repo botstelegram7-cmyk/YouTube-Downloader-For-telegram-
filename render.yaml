@@ -23,8 +23,12 @@ services:
         generateValue: true  # Telegram echoes this back on every update
       - key: STARTUP_NOTIFY_CHAT_ID
         value: "0"           # send /id to the bot, then paste the chat id here
-      - key: MAX_UPLOAD_MB
-        value: "50"          # the ceiling of Telegram's cloud Bot API
+      - key: TELEGRAM_API_ID
+        sync: false          # my.telegram.org → API development tools (enables 2000 MB)
+      - key: TELEGRAM_API_HASH
+        sync: false          # identifies the application; the bot token still authorises
+      - key: MIN_FREE_DISK_MB
+        value: "256"         # hosting headroom, not a file cap
       - key: MAX_CONCURRENT_JOBS
         value: "1"           # safe on a 512 MB instance
       - key: FRAGMENT_CONCURRENCY

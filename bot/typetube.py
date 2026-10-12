@@ -197,17 +197,21 @@ def cli_command(settings: Settings) -> list[str]:
     return [binary]
 
 
+def cli_present(settings: Settings) -> bool:
+    """Whether the TypeTube CLI is actually installed (version 1.1.4 prints no version)."""
+    binary = settings.typetube_bin.strip()
+    if binary.endswith((".js", ".mjs", ".cjs")):
+        return os.path.isfile(binary)
+    return bool(shutil.which(binary))
+
+
 def ensure_available(settings: Settings) -> list[str]:
     """Validate the toolchain; return human-readable problems (empty = all good)."""
     problems: list[str] = []
 
-    binary = settings.typetube_bin.strip()
-    if binary.endswith((".js", ".mjs", ".cjs")):
-        if not os.path.isfile(binary):
-            problems.append(f"TYPETUBE_BIN points at {binary}, which does not exist")
-    elif not shutil.which(binary):
+    if not cli_present(settings):
         problems.append(
-            f"the TypeTube CLI ({binary}) is not on PATH — install it with "
+            f"the TypeTube CLI ({settings.typetube_bin.strip()}) is not on PATH — install it with "
             f"`npm install -g typetube@{TESTED_CLI}` (Node {MIN_NODE[0]}.{MIN_NODE[1]}+)"
         )
 
@@ -406,11 +410,20 @@ def download_command(
     audio_only: bool,
     audio_quality: str,
     codec: str,
+    video_only: bool = False,
 ) -> list[str]:
-    """Build the CLI argv for one download."""
+    """Build the CLI argv for one download.
+
+    ``video_only`` matters more than it looks: the engine's ``-v`` mode downloads a video
+    *and* an audio stream and muxes them, and it refuses a video whose track has no audio at
+    all. When the resolved track says there is no audio, ``--video-only`` is the only mode
+    that can succeed.
+    """
     command = [*cli_command(settings), "download", url, str(destination)]
     if audio_only:
         command += ["-x", "-a", audio_quality]
+    elif video_only:
+        command += ["--video-only", "-f", quality, "-c", codec, "--ext", "mp4"]
     else:
         command += ["-v", "-f", quality, "-a", audio_quality, "-c", codec, "--ext", "mp4"]
     command += ["-N", str(settings.typetube_workers), "--chunk-size", str(settings.typetube_chunk_mb)]
@@ -424,6 +437,7 @@ async def download(
     settings: Settings,
     quality: str = "highest",
     audio_only: bool = False,
+    video_only: bool = False,
     codec: str = "avc1",
     registry=None,
     cancel_event: asyncio.Event | None = None,
@@ -447,8 +461,14 @@ async def download(
         audio_only=audio_only,
         audio_quality=audio_quality,
         codec=codec,
+        video_only=video_only,
     )
-    log.info("TypeTube download starting (quality=%s, audio_only=%s)", quality, audio_only)
+    log.info(
+        "TypeTube download starting (quality=%s, audio_only=%s, video_only=%s)",
+        quality,
+        audio_only,
+        video_only,
+    )
 
     emitted: list[str] = []
 

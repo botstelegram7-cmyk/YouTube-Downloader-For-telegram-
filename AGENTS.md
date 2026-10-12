@@ -45,8 +45,11 @@ JavaScript any more.
   ffprobe on the local file). A document is only a fallback when Telegram refuses the
   container, and that fallback must be logged.
 - **Honesty:** never state a capability in the UI, logs or docs that the code does not have.
-  The upload ceiling is Telegram's (50 MB cloud, 2000 MB with a self-hosted Bot API server);
-  `MAX_UPLOAD_MB` may only lower it.
+  The upload ceiling is Telegram's — 50 MB on the cloud Bot API, 2000 MB over MTProto with the
+  bot token, 2000 MB on a self-hosted local Bot API server. Nothing in this application may cap
+  it, and 4000 MB (Premium user accounts) must never be claimed for a bot.
+- **No user session:** large uploads are authorised by `BOT_TOKEN` + `TELEGRAM_API_ID` /
+  `TELEGRAM_API_HASH` only. Never introduce a session string, a phone login or an OTP step.
 - **Security:** keep the SSRF guard in `bot/urls.py` intact (scheme allow-list, blocked
   hosts, DNS-resolution check); `ALLOW_PRIVATE_URLS=true` is a testing-only escape hatch, so
   do not make it the default or hide it. Secrets are read from the environment and are never

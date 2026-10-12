@@ -78,7 +78,7 @@ to run. The reason is the last line before the exit:
 | Log line | Fix |
 |---|---|
 | `ConfigError: BOT_TOKEN is required` | Set `BOT_TOKEN`. |
-| `ConfigError: … port` / `MAX_UPLOAD_MB` out of range | The setting is outside its allowed range; `/health` and the banner print the effective values. |
+| `ConfigError: … port` out of range | The setting is outside its allowed range; `/health` and the banner print the effective values. |
 | `MissingDependency: FFmpeg was not found …` | Install FFmpeg or point `FFMPEG_BINARY`/`FFPROBE_BINARY` at it. |
 | `CommandError: ffprobe failed: …` at boot | The binary exists but cannot execute (wrong architecture, missing shared library). Test with `ffprobe -version` inside the container. |
 | `Could not write to the download directory` | `DOWNLOAD_DIR` is not writable by the container user (uid 10001). Mount a writable volume or change the path. |
@@ -179,17 +179,19 @@ startup log. Give the host about twice the size of the largest file you intend t
 
 ## Uploads fail or stall
 
-**"That file is too large".** The bot refuses *before* downloading when the estimate
-exceeds the ceiling. Read the message: it names the ceiling and why. The number comes from
-the API in use — **50 MB on the cloud Bot API, 2000 MB with a local Bot API server**
-(`TELEGRAM_API_BASE`). `MAX_UPLOAD_MB` can only lower it; it can never raise what Telegram
-allows. `/limits` explains this to users, and the startup banner prints it for operators.
+**"That file is too large".** The bot refuses *after* downloading, when the finished file
+exceeds what Telegram will take from this bot — never before, because there is no size cap in
+this application to check against. Read the message: it names the ceiling and why. The number
+comes from the transport in use — **50 MB on the cloud Bot API, 2000 MB over MTProto with your
+bot token, 2000 MB with a local Bot API server** (`TELEGRAM_API_BASE`). To raise it, set
+`TELEGRAM_API_ID` and `TELEGRAM_API_HASH`; nothing you can set will ever *lower* it. `/limits`
+explains this to users, and the startup banner prints it for operators.
 
 > A file that fits under the ceiling can still be refused by Telegram itself (for example
 > 50 MB exactly, with multipart overhead). Telegram's error is passed through verbatim.
 
 **The upload stalls at some percentage.** Telegram throttles large uploads; the bot honours
-`RetryAfter` and reports "Telegram asked me to slow down". A stall that never recovers
+`RetryAfter`/`FLOOD_WAIT` and reports how long Telegram asked it to wait. A stall that never recovers
 usually means a proxy/load balancer cutting long-lived connections — the upload timeout is
 generous (`1.5 s per MB`, minimum 10 minutes) by design. Check the host's request timeout
 settings before blaming the bot.

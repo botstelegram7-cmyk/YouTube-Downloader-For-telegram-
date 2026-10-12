@@ -12,7 +12,7 @@ This guide walks through every supported route, in the order most people want th
    - [3a. Render (blueprint, one click)](#3a-render-blueprint-one-click)
    - [3b. Voroa](#3b-voroa)
    - [3c. Any Docker host (Fly.io, Railway, a VPS)](#3c-any-docker-host)
-4. [Step 4 — Uploads larger than 50 MB (a Telegram user session)](#step-4--uploads-larger-than-50-mb-a-telegram-user-session)
+4. [Step 4 — Uploads larger than 50 MB (bot-token MTProto)](#step-4--uploads-larger-than-50-mb-bot-token-mtproto)
 5. [Step 5 — Age-restricted or sign-in-only videos (cookies)](#step-5--age-restricted-or-sign-in-only-videos-cookies)
 6. [Step 6 — Keep a free instance awake](#step-6--keep-a-free-instance-awake)
 7. [Step 7 — Day-two operations](#step-7--day-two-operations)
@@ -64,8 +64,8 @@ python main.py                  # no WEBHOOK_URL set → long polling, no ports 
 
 Send a link; press a quality button; watch the status message. `Ctrl+C` stops it cleanly.
 
-If you have Docker, the same thing with one line — including the user session so
-uploads may reach 2000 MB:
+If you have Docker, the same thing with one line — set `TELEGRAM_API_ID` and
+`TELEGRAM_API_HASH` and uploads reach 2000 MB with no account of any kind:
 
 ```bash
 cp .env.example .env && $EDITOR .env      # BOT_TOKEN, TELEGRAM_API_ID, TELEGRAM_API_HASH, OWNER_USER_ID
@@ -146,56 +146,57 @@ less snappy but works from a home network or a container with no ingress.
 
 ---
 
-## Step 4 — Uploads larger than 50 MB (a Telegram user session)
+## Step 4 — Uploads larger than 50 MB (bot-token MTProto)
 
-Telegram lets a **bot** upload only 50 MB per file. A **user account** may upload 2000 MB
-(4000 MB with Premium) — so the bot uploads through your account and then hands the file to
-the user with a server-side copy, which is why the message still comes from the bot.
-
-Nothing extra needs hosting. You need three values:
+Telegram's Bot API refuses **any** bot upload above 50 MB — that ceiling is Telegram's, and no
+setting in this application can change it. Telegram's own protocol, **MTProto**, allows a bot
+to send **2000 MB** per file, and it needs nothing you do not already have:
 
 ```dotenv
 TELEGRAM_API_ID=1234567
 TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
-TELEGRAM_SESSION_STRING=BQ...
 ```
 
-1. `api_id` / `api_hash` come from [my.telegram.org](https://my.telegram.org) → *API
-   development tools*. They are personal credentials — as sensitive as the bot token.
-2. Generate the session string **on your own machine**, once, because it needs a login code:
+1. Take both values from [my.telegram.org](https://my.telegram.org) → *API development tools*.
+   They identify **your Telegram application**; they are not a login and they authorise nothing
+   on their own.
+2. Put them in the service's environment and restart. Your existing `BOT_TOKEN` authenticates
+   the bot over MTProto exactly as it does over the Bot API.
 
-   ```bash
-   python scripts/make_session.py
-   ```
+That is the whole setup. No second account, no phone number, no login code, **no session
+string to store or leak** — which is why this is the recommended route.
 
-   It signs in, prints the session string, and tells you whether that account has Premium
-   (which decides between 2000 MB and 4000 MB).
-3. Put all three into the service's environment and restart. The startup banner and `/limits`
-   then report the session's ceiling, and the log line `Large uploads enabled: session on
-   account …` confirms it connected.
+Confirm it before trusting it:
+
+```bash
+python main.py --check     # prints "MTProto : ready — bot token + API ID/hash, no user login"
+```
+
+The startup banner then reads `Upload : up to 2000 MB per file (MTProto with your bot token)`,
+and the log line `Large uploads enabled: MTProto as @yourbot, up to 2000 MB per file` confirms
+the client connected. If it cannot connect, that is logged as a warning and the bot keeps
+running on the Bot API — a broken optional transport must never take the bot offline.
 
 Practical notes:
 
-* **Use a dedicated account** if you can — uploads are stored in that account's chat with the
-  bot, and are deleted again as soon as the user's copy is delivered.
-* **The session is a full login.** Anyone holding it can use that account; revoke it from
-  Telegram → *Settings → Devices* and generate a new one if it leaks.
-* **`STORAGE_CHAT_ID`** (optional) parks uploads in a specific chat — for example a private
-  channel where both the account and the bot are members — instead of the bot's chat.
-* **Disk.** Each job needs room for the file plus its remux; a 2 GB delivery needs a
-  correspondingly roomy workspace and RAM to match.
-* **Rate limits.** A brand-new session uploading gigabytes on its first day may be asked to
-  wait (`FLOOD_WAIT`). The bot reports that plainly instead of retrying in a loop.
+* **Files under 50 MB still go through the Bot API.** MTProto wakes only when the file needs it,
+  so ordinary links see no change at all.
+* **4000 MB is not available to bots.** That is Telegram Premium for *user* accounts; offering it
+  would mean storing somebody's login session. This bot does not do that.
+* **Disk.** Downloads are streamed to disk (never through RAM) and each job needs room for the
+  file plus its remux. `MIN_FREE_DISK_MB` (default 256) is the floor: a job that would cross it is
+  refused up front, and partial files are deleted on every failure path.
+* **Rate limits.** Telegram may answer `FLOOD_WAIT` on a busy day; the bot reports the wait plainly
+  instead of retrying in a loop.
+* **`MT_CONNECTIONS`** (default 4, maximum 8) tunes how many parallel connections carry an upload.
 
 ### Alternative: a self-hosted Bot API server
 
-If you would rather keep every request on the Bot API, run Telegram's own server with
-`--local` and point `TELEGRAM_API_BASE` at it — the ceiling then becomes 2000 MB and **all**
-API calls go through it. `docker-compose.yml` can do this for you (`docker compose --profile
-local-api up -d --build`); it costs a second container and roughly twice the largest file in
-scratch space. The bot detects it, reports `local Bot API server` in the banner, and `/limits`
-explains the ceiling. Note that this route cannot exceed 2000 MB: **only a user session
-reaches 4000 MB.**
+If you would rather keep everything on the Bot API, run Telegram's own server with `--local` and
+point `TELEGRAM_API_BASE` at it — the ceiling becomes 2000 MB and **all** API calls go through it.
+`docker-compose.yml` can do this (`docker compose --profile local-api up -d --build`); it costs a
+second container and roughly twice the largest file in scratch space. The bot detects it, reports
+`local Bot API server` in the banner, and `/limits` explains the ceiling.
 
 ## Step 5 — What the engine cannot fetch
 
@@ -267,16 +268,17 @@ constantly, so a newer CLI is usually the fix for sudden extraction failures.
 docker compose up -d --build
 ```
 
-**Change a limit.** Edit the environment variable in the dashboard (or `.env`) and restart.
-`MAX_UPLOAD_MB`, `MAX_CONCURRENT_JOBS`, `DEFAULT_QUALITY`, `MAX_DURATION_MINUTES`,
-`LOG_LEVEL` are the usual ones.
+**Change a knob.** Edit the environment variable in the dashboard (or `.env`) and restart.
+`MAX_CONCURRENT_JOBS`, `DEFAULT_QUALITY`, `MAX_DURATION_MINUTES`, `MIN_FREE_DISK_MB`,
+`UPLOAD_TRANSPORT`, `LOG_LEVEL` are the usual ones. There is no `MAX_UPLOAD_MB` any more:
+file size is Telegram's ceiling, not a setting.
 
 **Rotate the webhook secret.** Set a new `WEBHOOK_SECRET` and restart; the bot re-registers
 the webhook at startup, so nothing else is needed.
 
-**Move the bot to another host.** Only the environment variables carry state — including the
-session string. If you use the optional local Bot API server, its `telegram-bot-api-data`
-volume travels with it.
+**Move the bot to another host.** Only the environment variables carry state — the bot token and
+`api_id`/`api_hash`, with nothing to export or re-login. If you use the optional local Bot API
+server, its `telegram-bot-api-data` volume travels with it.
 
 ---
 
@@ -287,7 +289,7 @@ volume travels with it.
 | RAM / CPU | 512 MB / 0.1 vCPU | free Nano tier (small) |
 | Sleep | after ~15 min idle | after ~15 min idle |
 | Cold start | 30–60 s | similar |
-| Upload ceiling | 50 MB (or 2000 MB with a user session) | 50 MB (or 2000 MB with a user session) |
+| Upload ceiling | 50 MB by default; 2000 MB with `TELEGRAM_API_ID`/`HASH` | same |
 | Practical use | 1 job at a time, 360p–720p, short clips | same |
 
 A 512 MB instance handles one 720p job comfortably, and two only if the videos are short.

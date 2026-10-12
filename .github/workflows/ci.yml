@@ -52,7 +52,7 @@ jobs:
         env:
           BOT_TOKEN: '123456789:placeholder-token-used-only-by-ci'
           WEBHOOK_URL: 'https://example.invalid'
-          MAX_UPLOAD_MB: '50'
+          # Deliberately no API ID/hash: the check must also pass in the 50 MB configuration.
         run: python main.py --check
 
       - name: End-to-end pipeline (mock Bot API, stubbed engine, real FFmpeg)
@@ -72,7 +72,6 @@ jobs:
           docker run --rm \
             -e BOT_TOKEN=123456789:placeholder-token-used-only-by-ci \
             -e WEBHOOK_URL=https://example.invalid \
-            -e MAX_UPLOAD_MB=50 \
             ytbot-test python main.py --check
 
       - name: End-to-end check inside the image (FFmpeg, webhook, /health)

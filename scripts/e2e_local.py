@@ -397,7 +397,6 @@ async def run(args: argparse.Namespace) -> int:
             if Path(ffmpeg).with_name("ffprobe").exists()
             else "ffprobe",
             "DOWNLOAD_DIR": str(downloads),
-            "MAX_UPLOAD_MB": "50",
             # The engine is the stub above, invoked exactly like the real CLI.
             "TYPETUBE_BIN": str(stub),
             "TYPETUBE_WORKERS": "2",
@@ -451,10 +450,16 @@ async def run(args: argparse.Namespace) -> int:
         else:
             ok(
                 f"/health ok — ffmpeg={health['runtime']['ffmpeg']}, "
-                f"upload limit {health['upload_limit_mb']} MB, mode {health['mode']}"
+                f"upload capability {health['upload_capability_mb']} MB via {health['upload_transport']}, "
+                f"mode {health['mode']}"
             )
-            if health["upload_limit_mb"] != 50:
-                failures.append(f"unexpected upload limit: {health['upload_limit_mb']}")
+            # The harness points TELEGRAM_API_BASE at this mock server, i.e. a *local* Bot API
+            # server, whose Telegram-set ceiling is 2000 MB. No API ID/hash is set here, so the
+            # transport stays "bot" — the point being that the app itself never lowers either.
+            if health["upload_capability_mb"] != 2000:
+                failures.append(f"unexpected upload capability: {health['upload_capability_mb']}")
+            if health["upload_transport"] != "bot":
+                failures.append(f"unexpected transport: {health['upload_transport']}")
 
         # startup introduction -------------------------------------------------
         intro = await wait_for(

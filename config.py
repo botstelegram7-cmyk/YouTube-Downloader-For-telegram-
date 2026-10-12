@@ -7,10 +7,21 @@ required — a deploy with nothing else set runs, and says exactly what it is do
 Importing this module never touches the network or the filesystem, so it is safe to import
 from tests and from ``main.py --check``.
 
+The application imposes **no size limits of its own**. The only ceilings that exist are
+Telegram's, and they belong to the transport carrying the file:
+
+* the cloud Bot API accepts 50 MB per bot upload,
+* a self-hosted ``--local`` Bot API server accepts 2000 MB,
+* **MTProto accepts 2000 MB for bots** — which is how this bot sends big files without a
+  user account, a phone number or a session string.
+
+Everything else (disk, RAM, bandwidth) is a property of the host, not a policy, and is
+reported as such: see :mod:`bot.utils` and the disk guard in :mod:`bot.jobs`.
+
 Sections
 --------
 1. Telegram
-2. Upload limits
+2. Upload transport and Telegram's ceilings
 3. Engine (TypeTube)
 4. Quality
 5. Runtime and housekeeping
@@ -26,21 +37,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "3.2.0"
+VERSION = "3.3.0"
 PROJECT_NAME = "YouTube Downloader for Telegram"
 
-#: Telegram cloud Bot API: bots may upload at most 50 MB per file.
-CLOUD_UPLOAD_LIMIT_MB = 50
-#: A local Bot API server started with ``--local`` raises that ceiling to 2000 MB.
-#: This is Telegram's limit for *bots*: Premium's 4 GB applies to user uploads only.
-LOCAL_UPLOAD_LIMIT_MB = 2000
-#: MTProto *user* sessions (Pyrofork) may upload 2000 MB per file — the route this bot
-#: uses for big files, because it needs no extra service and no Premium account.
-MT_UPLOAD_LIMIT_MB = 2000
-#: …and 4000 MB when that account has Telegram Premium (MT_PREMIUM_ACCOUNT=1).
-MT_PREMIUM_UPLOAD_LIMIT_MB = 4000
+# --------------------------------------------------------------------------- #
+# Telegram's ceilings (not the application's)
+#
+# These are protocol facts, quoted so the bot can be honest about them and so it can skip
+# a transport that physically cannot carry a file. Nothing here is a policy knob: there is
+# no setting that lowers them, and none of them is checked before the file exists.
+# --------------------------------------------------------------------------- #
+#: HTTP Bot API on Telegram's own servers: 50 MB per upload.
+BOT_API_UPLOAD_MB = 50
+#: A Bot API server running with ``--local``: 2000 MB per upload.
+LOCAL_BOT_API_UPLOAD_MB = 2000
+#: MTProto (the protocol behind every official client): 2000 MB per upload for bots.
+#: 4000 MB exists only for Telegram Premium *user* accounts, which a bot cannot be.
+MT_UPLOAD_MB = 2000
 
-DEFAULT_UPLOAD_LIMIT_MB = {False: CLOUD_UPLOAD_LIMIT_MB, True: LOCAL_UPLOAD_LIMIT_MB}
+#: Kept for callers that think in bytes.
+MB = 1024 * 1024
 
 _FLAG_VALUES = {
     "1": True,
@@ -141,20 +157,22 @@ class Settings:
     startup_notify_chat_id: int = 0
     telegram_api_base: str = ""
 
-    # 2. Upload limits ------------------------------------------------------
-    max_upload_mb: int = 0
-    max_duration_minutes: int = 0
-
-    # 2b. MTProto delivery (Pyrofork user session) --------------------------
-    # This is what makes 2 GB files possible without hosting a Bot API server:
-    # the bot uploads through a logged-in account and copies the file server-side.
+    # 2. Upload transport ---------------------------------------------------
+    # MTProto is authorised with the *bot token*: api_id/api_hash identify the Telegram
+    # application, the token identifies the account. No phone number, no login code, no
+    # session string, nothing to store.
     api_id: int = 0
     api_hash: str = ""
-    session_string: str = ""
-    storage_chat_id: int = 0
     mt_connections: int = 4
-    mt_premium: bool = False
     upload_transport: str = "auto"  # auto | bot | mtproto
+
+    # 2b. Housekeeping ------------------------------------------------------
+    #: 0 = no duration limit. A hosting guard, not a size policy: it refuses a video
+    #: before anything is downloaded, because a 10-hour 4K download helps nobody.
+    max_duration_minutes: int = 0
+    #: Refuse to start a job when the workspace has less than this free. Disk is the
+    #: host's constraint, so it is reported on its own terms — never as a file-size cap.
+    min_free_disk_mb: int = 256
 
     # 3. Engine (TypeTube) --------------------------------------------------
     typetube_bin: str = "typetube"
@@ -195,55 +213,57 @@ class Settings:
         return bool(self.telegram_api_base) and self.telegram_api_base.rstrip("/") != "https://api.telegram.org"
 
     @property
-    def api_upload_cap_mb(self) -> int:
-        """Ceiling of the *Bot API* in use (50 MB in the cloud, 2000 MB when self-hosted)."""
-        return LOCAL_UPLOAD_LIMIT_MB if self.uses_local_api else CLOUD_UPLOAD_LIMIT_MB
+    def bot_api_capability_mb(self) -> int:
+        """What the Bot API in use accepts per upload (Telegram's number, not ours)."""
+        return LOCAL_BOT_API_UPLOAD_MB if self.uses_local_api else BOT_API_UPLOAD_MB
 
     @property
     def bot_id(self) -> int:
-        """The bot's own numeric id, taken from the token (used as the upload target)."""
+        """The bot's own numeric id, taken from the token."""
         head = self.bot_token.split(":", 1)[0] if self.bot_token else ""
         return int(head) if head.isdigit() else 0
 
     @property
     def mtproto_ready(self) -> bool:
-        """True when a usable MTProto session is configured."""
-        return bool(self.api_id and self.api_hash and self.session_string and self.bot_id)
+        """True when the MTProto transport can start: api_id, api_hash and a bot token.
+
+        No user account is involved. ``api_id``/``api_hash`` identify the Telegram
+        *application*; the bot token authorises the bot itself, which is why nothing has to
+        be logged into and no session string has to be stored.
+        """
+        return bool(self.api_id and self.api_hash and self.bot_id)
 
     @property
-    def mtproto_cap_mb(self) -> int:
-        """Per-file ceiling of the user session (Telegram's limit for accounts)."""
-        return MT_PREMIUM_UPLOAD_LIMIT_MB if self.mt_premium else MT_UPLOAD_LIMIT_MB
+    def mtproto_capability_mb(self) -> int:
+        """What MTProto accepts per upload for a bot: Telegram's 2000 MB protocol ceiling."""
+        return MT_UPLOAD_MB
 
     @property
     def transport(self) -> str:
-        """Transport that carries files too big for the Bot API: ``mtproto`` or ``bot``."""
+        """Which transport carries a file the Bot API cannot: ``mtproto`` or ``bot``."""
         if self.upload_transport == "bot":
             return "bot"
         return "mtproto" if self.mtproto_ready else "bot"
 
     @property
-    def upload_cap_mb(self) -> int:
-        """Hard ceiling of the whole setup: the better of the Bot API and the session."""
-        caps = [self.api_upload_cap_mb]
+    def upload_capability_mb(self) -> int:
+        """The largest file this deployment can deliver, set by Telegram alone.
+
+        The application adds nothing on top: there is no ``MAX_UPLOAD_MB`` to lower it, and
+        the only check anywhere is against the transport that will actually carry the file.
+        """
+        caps = [self.bot_api_capability_mb]
         if self.transport == "mtproto":
-            caps.append(self.mtproto_cap_mb)
+            caps.append(self.mtproto_capability_mb)
         return max(caps)
 
     @property
-    def upload_limit_mb(self) -> int:
-        """Effective upload ceiling in MB.
-
-        ``MAX_UPLOAD_MB`` is *clamped* rather than rejected: a ceiling this bot cannot honour
-        is a reason to warn loudly, not to refuse to boot (that only creates deploy loops).
-        """
-        if self.max_upload_mb:
-            return min(self.max_upload_mb, self.upload_cap_mb)
-        return self.upload_cap_mb
+    def upload_capability_bytes(self) -> int:
+        return self.upload_capability_mb * MB
 
     @property
-    def upload_limit_bytes(self) -> int:
-        return self.upload_limit_mb * 1024 * 1024
+    def min_free_disk_bytes(self) -> int:
+        return self.min_free_disk_mb * MB
 
     @property
     def api_base(self) -> str:
@@ -292,15 +312,12 @@ class Settings:
             startup_notify_chat_id=_int("STARTUP_NOTIFY_CHAT_ID", 0, minimum=0),
             telegram_api_base=_str("TELEGRAM_API_BASE").rstrip("/"),
             # Limits
-            max_upload_mb=_int("MAX_UPLOAD_MB", 0, minimum=0),
             max_duration_minutes=_int("MAX_DURATION_MINUTES", 0, minimum=0),
-            # MTProto delivery (accepts both the TELEGRAM_*/API_* spellings)
+            min_free_disk_mb=_int("MIN_FREE_DISK_MB", 256, minimum=0),
+            # MTProto, authorised with the bot token (both spellings are accepted)
             api_id=_int("TELEGRAM_API_ID", 0, minimum=0) or _int("API_ID", 0, minimum=0),
             api_hash=_str("TELEGRAM_API_HASH") or _str("API_HASH"),
-            session_string=_str("TELEGRAM_SESSION_STRING") or _str("SESSION_STRING"),
-            storage_chat_id=_int("STORAGE_CHAT_ID", 0),
             mt_connections=_int("MT_CONNECTIONS", 4, minimum=1, maximum=8),
-            mt_premium=_bool("MT_PREMIUM_ACCOUNT", False),
             upload_transport=(_str("UPLOAD_TRANSPORT", "auto") or "auto").lower(),
             # Engine
             typetube_bin=_str("TYPETUBE_BIN", "typetube") or "typetube",
@@ -352,21 +369,17 @@ class Settings:
         if self.upload_transport not in ("auto", "bot", "mtproto"):
             problems.append("UPLOAD_TRANSPORT must be one of auto, bot, mtproto")
 
-        # A half-configured session is a typo, not a limit: say so instead of failing later.
-        if (self.api_id or self.api_hash or self.session_string) and not self.mtproto_ready:
+        # A half-configured API key pair is a typo, not a limit: say so instead of failing later.
+        if (self.api_id or self.api_hash) and not self.mtproto_ready:
             missing = [
                 name
-                for name, value in (
-                    ("TELEGRAM_API_ID", self.api_id),
-                    ("TELEGRAM_API_HASH", self.api_hash),
-                    ("TELEGRAM_SESSION_STRING", self.session_string),
-                )
+                for name, value in (("TELEGRAM_API_ID", self.api_id), ("TELEGRAM_API_HASH", self.api_hash))
                 if not value
             ]
             problems.append(
-                "MTProto uploads need all three of TELEGRAM_API_ID, TELEGRAM_API_HASH and "
-                f"TELEGRAM_SESSION_STRING — missing: {', '.join(missing)} "
-                "(generate the session with `python scripts/make_session.py`)"
+                "MTProto uploads need both TELEGRAM_API_ID and TELEGRAM_API_HASH from "
+                f"https://my.telegram.org — missing: {', '.join(missing)}. (The bot token is the "
+                "BOT_TOKEN you already have; no user account or login code is involved.)"
             )
 
         return problems
@@ -375,37 +388,25 @@ class Settings:
         """Non-fatal advice worth printing at startup."""
         notes: list[str] = []
 
-        if self.max_upload_mb and self.max_upload_mb > self.upload_cap_mb:
-            notes.append(
-                f"MAX_UPLOAD_MB={self.max_upload_mb} is above what this setup can send, so it is clamped to "
-                f"{self.upload_cap_mb} MB — nothing above that would upload successfully."
-            )
-
         if self.transport == "mtproto":
             notes.append(
-                f"Large uploads go through a Telegram user session (MTProto): up to {self.mtproto_cap_mb} MB "
-                f"per file{' (Premium account)' if self.mt_premium else ''}."
+                "Large uploads use MTProto with your bot token: Telegram allows up to "
+                f"{self.mtproto_capability_mb} MB per file that way, and nothing has to be logged into. "
+                "The bot token, TELEGRAM_API_ID and TELEGRAM_API_HASH are all that is needed."
             )
-        elif self.api_upload_cap_mb > CLOUD_UPLOAD_LIMIT_MB:
-            notes.append(f"Uploads are sent to a local Bot API server, which allows {self.api_upload_cap_mb} MB.")
+        elif self.uses_local_api:
+            notes.append(
+                f"Uploads go to a local Bot API server, which accepts {self.bot_api_capability_mb} MB per file."
+            )
         else:
             notes.append(
-                f"Uploads are limited to {self.api_upload_cap_mb} MB by the cloud Bot API. For bigger files add "
-                "TELEGRAM_API_ID + TELEGRAM_API_HASH + TELEGRAM_SESSION_STRING (see scripts/make_session.py, "
-                f"2 GB per file), or point TELEGRAM_API_BASE at a local Bot API server."
+                f"Without TELEGRAM_API_ID and TELEGRAM_API_HASH the bot is limited to the Bot API's "
+                f"{self.bot_api_capability_mb} MB per file. Adding them costs nothing, needs no account "
+                f"login, and raises the ceiling to {self.mtproto_capability_mb} MB — see .env.example \u00a72."
             )
 
         if self.upload_transport == "mtproto" and not self.mtproto_ready:
-            notes.append("UPLOAD_TRANSPORT=mtproto was requested but the session is incomplete; using the Bot API.")
-
-        if self.mtproto_ready and self.storage_chat_id:
-            notes.append(f"MTProto uploads are stored in chat {self.storage_chat_id} (the bot must be a member).")
-
-        if self.mt_premium and self.mtproto_ready and not self.uses_local_api:
-            notes.append(
-                f"MT_PREMIUM_ACCOUNT=1: the {MT_PREMIUM_UPLOAD_LIMIT_MB} MB ceiling applies only if the session's "
-                "account really has Premium (scripts/make_session.py confirms it)."
-            )
+            notes.append("UPLOAD_TRANSPORT=mtproto was requested but TELEGRAM_API_ID/TELEGRAM_API_HASH are missing.")
 
         if not self.runs_webhook and not self.use_polling:
             notes.append(
@@ -428,9 +429,13 @@ class Settings:
         if self.max_concurrent_jobs > 4:
             notes.append(f"MAX_CONCURRENT_JOBS={self.max_concurrent_jobs} downloads at once can exhaust a small VPS.")
 
-        if self.uses_local_api and self.max_concurrent_jobs > 1:
+        if self.transport == "mtproto" and self.mt_connections > 8:
+            notes.append("MT_CONNECTIONS is capped at 8 by Telegram's client limits.")
+
+        if self.min_free_disk_mb < 128:
             notes.append(
-                "With the local Bot API server, each concurrent upload uses about as much disk as the file itself."
+                "MIN_FREE_DISK_MB is very low: a job that fills the disk mid-download fails, and the "
+                "workspace needs room for the file plus its remux."
             )
 
         return notes
@@ -441,12 +446,12 @@ class Settings:
             "version": VERSION,
             "api_mode": self.api_mode,
             "api_base": self.api_base,
-            "upload_limit_mb": self.upload_limit_mb,
-            "upload_cap_mb": self.upload_cap_mb,
-            "api_upload_cap_mb": self.api_upload_cap_mb,
+            "upload_capability_mb": self.upload_capability_mb,
+            "bot_api_capability_mb": self.bot_api_capability_mb,
+            "mtproto_capability_mb": self.mtproto_capability_mb if self.mtproto_ready else 0,
+            "mtproto": "ready (bot token)" if self.mtproto_ready else "off",
             "upload_transport": self.transport,
-            "mtproto": "ready" if self.mtproto_ready else "off",
-            "mtproto_cap_mb": self.mtproto_cap_mb if self.mtproto_ready else 0,
+            "min_free_disk_mb": self.min_free_disk_mb,
             "max_duration_minutes": self.max_duration_minutes or "unlimited",
             "max_concurrent_jobs": self.max_concurrent_jobs,
             "default_quality": self.default_quality,
@@ -482,10 +487,10 @@ def require_settings(env: dict[str, str] | None = None) -> Settings:
 
 
 __all__ = [
-    "CLOUD_UPLOAD_LIMIT_MB",
-    "LOCAL_UPLOAD_LIMIT_MB",
-    "MT_PREMIUM_UPLOAD_LIMIT_MB",
-    "MT_UPLOAD_LIMIT_MB",
+    "BOT_API_UPLOAD_MB",
+    "LOCAL_BOT_API_UPLOAD_MB",
+    "MB",
+    "MT_UPLOAD_MB",
     "PROJECT_NAME",
     "SETTINGS",
     "VERSION",

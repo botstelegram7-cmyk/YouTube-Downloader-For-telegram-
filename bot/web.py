@@ -43,7 +43,8 @@ def create_web_app(application: Application, settings: Settings) -> web.Applicat
                 "version": VERSION,
                 "mode": "webhook" if settings.runs_webhook else "polling",
                 "api_mode": settings.api_mode,
-                "upload_limit_mb": settings.upload_limit_mb,
+                "upload_capability_mb": settings.upload_capability_mb,
+                "upload_transport": settings.transport,
             }
         )
 
@@ -56,8 +57,10 @@ def create_web_app(application: Application, settings: Settings) -> web.Applicat
             "uptime_seconds": round(time.monotonic() - started),
             "mode": "webhook" if settings.runs_webhook else "polling",
             "api_mode": settings.api_mode,
-            "upload_limit_mb": settings.upload_limit_mb,
-            "api_upload_cap_mb": settings.api_upload_cap_mb,
+            "upload_capability_mb": settings.upload_capability_mb,
+            "bot_api_capability_mb": settings.bot_api_capability_mb,
+            "mtproto_capability_mb": settings.mtproto_capability_mb if settings.mtproto_ready else 0,
+            "upload_transport": settings.transport,
             "jobs": runtime.manager.stats(settings),
             "runtime": {
                 "ffmpeg": ffmpeg or "missing",

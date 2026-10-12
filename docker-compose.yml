@@ -1,11 +1,11 @@
 # Run the bot together with a local Telegram Bot API server.
 #
 # Why you would use this file: through the cloud Bot API (api.telegram.org) a bot
-# may upload at most 50 MB per file. The recommended way past that is a Telegram
-# user session (see DEPLOYMENT.md step 4) and needs no extra service; the optional
-# local Bot API server below — enabled with `docker compose --profile local-api up`
-# — raises
-# the ceiling to 2000 MB, and this compose file wires the two containers together.
+# may upload at most 50 MB per file. The recommended way past that needs no extra
+# service at all — set TELEGRAM_API_ID and TELEGRAM_API_HASH and the bot uploads over
+# MTProto with its own bot token (DEPLOYMENT.md step 4). The alternative below, the
+# local Bot API server — enabled with `docker compose --profile local-api up` — also
+# reaches 2000 MB and keeps every call on the Bot API.
 #
 #   1. Create .env next to this file with BOT_TOKEN, TELEGRAM_API_ID and
 #      TELEGRAM_API_HASH (see .env.example). WEBHOOK_URL is optional.
@@ -44,7 +44,7 @@ services:
       # which needs no inbound connection at all.
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
-      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2000}
+      MIN_FREE_DISK_MB: ${MIN_FREE_DISK_MB:-256}
       MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-2}
       STARTUP_NOTIFY_CHAT_ID: ${STARTUP_NOTIFY_CHAT_ID:-0}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

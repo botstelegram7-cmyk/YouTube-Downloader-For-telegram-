@@ -119,12 +119,10 @@ def test_audio_is_offered_with_an_estimate_from_bitrate_and_duration():
     assert "kbps" in audio.label
 
 
-def test_an_audio_track_above_the_upload_limit_says_so():
-    options = build_options(
-        track(audio_bitrate=256_000, duration=7200.0), SETTINGS, upload_limit_bytes=50 * 1024 * 1024
-    )
+def test_an_audio_track_longer_than_the_transport_can_carry_says_so():
+    options = build_options(track(audio_bitrate=256_000, duration=7200.0), SETTINGS, capability_bytes=50 * 1024 * 1024)
     audio = find_option(options, "audio")
-    assert "limit" in audio.description
+    assert "Telegram will accept" in audio.description
 
 
 def test_default_option_prefers_the_configured_quality():

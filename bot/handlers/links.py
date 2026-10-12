@@ -97,7 +97,7 @@ async def _inspect_and_offer(
         await _safe_edit(status, texts.too_long(track.duration, limit_minutes))
         return
 
-    options = build_options(track, settings, upload_limit_bytes=settings.upload_limit_bytes)
+    options = build_options(track, settings, capability_bytes=settings.upload_capability_bytes)
     if not options:
         await _safe_edit(status, texts.no_streams())
         return
@@ -109,7 +109,7 @@ async def _inspect_and_offer(
         track.title,
         human_duration(track.duration),
         track.author,
-        settings.upload_limit_mb,
+        settings.upload_capability_mb,
         replaces_running=rt.manager.for_user(user_id) is not None,
     )
 

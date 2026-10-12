@@ -60,7 +60,8 @@ async def dependency_report(settings: Settings) -> dict[str, str]:
     report["ffmpeg"] = ffmpeg or "MISSING"
 
     version = await typetube.cli_version(settings)
-    report["typetube"] = version or "MISSING"
+    # typetube 1.1.4 has no --version flag and answers nothing, so silence is not absence.
+    report["typetube"] = version or ("installed" if typetube.cli_present(settings) else "MISSING")
     node = typetube.node_version(settings.node_binary)
     report["node"] = f"{node[0]}.{node[1]}" if node else "MISSING"
 
@@ -114,15 +115,23 @@ async def run_check(settings: Settings, *, online: bool) -> int:
     problems.extend(typetube.ensure_available(settings))
 
     print(
-        f"Transport          : {settings.transport} — up to {settings.upload_limit_mb} MB per file"
-        f" (Bot API allows {settings.api_upload_cap_mb} MB"
-        + (f", session allows {settings.mtproto_cap_mb} MB" if settings.mtproto_ready else "")
+        f"Upload             : up to {settings.upload_capability_mb} MB per file, via {settings.transport}"
+        f" (Telegram's Bot API ceiling {settings.bot_api_capability_mb} MB"
+        + (f", MTProto ceiling {settings.mtproto_capability_mb} MB" if settings.mtproto_ready else "")
         + ")"
     )
-    if settings.transport == "mtproto" and not settings.mtproto_ready:
-        problems.append(
-            "UPLOAD_TRANSPORT=mtproto needs TELEGRAM_API_ID, TELEGRAM_API_HASH and TELEGRAM_SESSION_STRING."
+    if settings.mtproto_ready:
+        print(
+            "MTProto            : ready — bot token + API ID/hash, no user login"
+            f" (up to {settings.mtproto_capability_mb} MB per upload)"
         )
+    else:
+        print(
+            "MTProto            : off — set TELEGRAM_API_ID and TELEGRAM_API_HASH to raise uploads "
+            f"from {settings.bot_api_capability_mb} MB to {settings.mtproto_capability_mb} MB "
+            "(bot token only, no session string)"
+        )
+    print(f"Disk headroom      : {settings.min_free_disk_mb} MB kept free before a job starts")
 
     if online and not problems:
         try:

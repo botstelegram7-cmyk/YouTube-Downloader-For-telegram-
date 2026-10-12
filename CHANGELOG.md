@@ -4,6 +4,61 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 semantic versioning for its configuration surface and behaviour.
 
+## [3.3.0] — 2026-10-12
+
+**No size limits, and no user session: 2000 MB uploads with the bot you already have.**
+
+### Added
+
+* **Large uploads over MTProto, authorised by the bot token.** `TELEGRAM_API_ID` and
+  `TELEGRAM_API_HASH` identify your Telegram *application*; `BOT_TOKEN` still authorises the
+  bot. With both set, files that the Bot API cannot carry go out over Telegram's own protocol
+  at up to **2000 MB per file** — no second account, no phone number, no login code, and no
+  session string to store or leak. The Pyrogram client runs in memory (`in_memory=True`), so
+  no `.session` file is ever written.
+* **Direct delivery.** The MTProto client *is* the bot, so it sends the file straight into the
+  user's chat. The old upload-then-`copy_message` relay is gone: no second pass over the
+  network, and nothing is parked in a storage chat.
+* **Honest capability reporting.** `/limits`, `/status`, the banner, `/health`, `/stats` and
+  `python main.py --check` all state the ceiling the active transport really has, and the
+  Bot API route tells the operator exactly which two variables raise it.
+* **Disk-space guard.** `MIN_FREE_DISK_MB` (default 256) is a *hosting* constraint, checked
+  before a job starts and mapped from engine errors (`ENOSPC`) as `DiskSpaceError`, so "disk
+  full" is reported as such instead of as a download failure. Partial files are still deleted
+  on every path.
+* **Audio-less videos.** When the resolved track has no audio stream, the engine is invoked
+  with `--video-only` (its mux mode fails on such videos by design).
+* `bot/mtproto.py` is now the bot-token uploader; `bot/upload.py` routes per file and falls
+  back to the Bot API when MTProto is unavailable and the file still fits.
+
+### Changed
+
+* **`MAX_UPLOAD_MB` is removed.** Nothing in this application caps a download or an upload —
+  neither in the UI, nor in `config.py`, nor in validation. The only ceilings that exist are
+  Telegram's protocol limits (50 MB Bot API, 2000 MB MTProto/local Bot API) and the host's
+  disk, and they are kept separate everywhere they appear.
+* **The oversize check moved to where it belongs**: once, at the end of the pipeline, against
+  what the chosen transport can actually send. A file is never refused for a limit this bot
+  invented.
+* `UPLOAD_TRANSPORT` is now `auto` / `bot` / `mtproto`, and a forced-but-unconfigured
+  `mtproto` degrades to the Bot API with a warning instead of failing the deployment.
+* The startup banner reports `Upload : up to N MB per file (transport)` instead of a policy
+  number.
+* `docker-compose.yml` and `render.yaml` no longer set a size variable
+  (`MIN_FREE_DISK_MB`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` take its place).
+
+### Removed
+
+* `scripts/make_session.py`, `TELEGRAM_SESSION_STRING`, `STORAGE_CHAT_ID`,
+  `MT_PREMIUM_ACCOUNT`, `MAX_UPLOAD_MB`, and the user-session upload path with its
+  `copy_message` relay. There is no login-backed code path left in the project.
+* `bot/texts.py`'s session-instructions message and the `mt_premium` capability branches.
+
+### Fixed
+
+* `python main.py --check` no longer reports the TypeTube CLI as `MISSING` when it is installed
+  but silent: version 1.1.4 has no `--version` flag and prints nothing.
+
 ## [3.2.0] — 2026-10-12
 
 **A new download engine, and real 2 GB uploads.**

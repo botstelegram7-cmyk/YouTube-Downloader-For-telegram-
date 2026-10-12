@@ -7,7 +7,7 @@ bolded, and never a promise the code does not keep (sizes and limits especially)
 from __future__ import annotations
 
 from bot.utils import html_escape as esc
-from config import MT_UPLOAD_LIMIT_MB
+from config import BOT_API_UPLOAD_MB
 
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("start", "Welcome screen and shortcuts"),
@@ -30,7 +30,8 @@ def banner(name: str, version: str, settings_summary: dict) -> str:
         "═" * 64,
         f"  Engine     : {settings_summary.get('engine')} ({settings_summary.get('typetube_host')})",
         f"  Telegram   : {settings_summary.get('api_mode')} ({settings_summary.get('api_base')})",
-        f"  Upload cap : {settings_summary.get('upload_limit_mb')} MB  (via {_transport_label(settings_summary)})",
+        f"  Upload     : up to {settings_summary.get('upload_capability_mb')} MB per file"
+        f"  ({_transport_label(settings_summary)})",
         f"  Mode       : {mode}" + (f" → {settings_summary.get('webhook_url')}" if mode == "webhook" else ""),
         f"  FFmpeg     : {settings_summary.get('ffmpeg')}",
         f"  Parallel   : {settings_summary.get('max_concurrent_jobs')} job(s)"
@@ -43,13 +44,15 @@ def banner(name: str, version: str, settings_summary: dict) -> str:
 
 
 def _transport_label(summary: dict) -> str:
-    """How big files will travel, in words."""
+    """How a file travels, in words, with Telegram's own number attached."""
     if summary.get("upload_transport") == "mtproto":
-        cap = summary.get("mtproto_cap_mb") or 0
-        return f"Telegram session (MTProto), up to {cap} MB"
-    if (summary.get("api_upload_cap_mb") or 0) > 50:
-        return f"local Bot API server, up to {summary.get('api_upload_cap_mb')} MB"
-    return "cloud Bot API, up to 50 MB"
+        return f"MTProto with your bot token (Telegram allows {summary.get('mtproto_capability_mb')} MB)"
+    if (summary.get("bot_api_capability_mb") or 0) > BOT_API_UPLOAD_MB:
+        return f"a local Bot API server (Telegram allows {summary.get('bot_api_capability_mb')} MB there)"
+    return (
+        f"the Bot API, capped at {BOT_API_UPLOAD_MB} MB by Telegram itself — add TELEGRAM_API_ID and "
+        "TELEGRAM_API_HASH to reach 2000 MB with the same bot token"
+    )
 
 
 def welcome(name: str, version: str) -> str:
@@ -125,7 +128,8 @@ def startup_report(version: str, summary: dict, warnings: list[str]) -> str:
         "",
         f"<b>Engine</b>: {esc(str(summary.get('engine')))}",
         f"<b>Telegram API</b>: {esc(str(summary.get('api_mode')))}",
-        f"<b>Upload cap</b>: {summary.get('upload_limit_mb')} MB · {esc(_transport_label(summary))}",
+        f"<b>Upload</b>: up to {summary.get('upload_capability_mb')} MB per file"
+        f" · {esc(str(summary.get('upload_transport')))}",
         f"<b>Mode</b>: {esc(str(summary.get('mode')))}",
         f"<b>Jobs in parallel</b>: {summary.get('max_concurrent_jobs')}",
     ]
@@ -203,27 +207,28 @@ def done_caption(
 
 
 def too_large(size_mb: float, summary: dict) -> str:
-    """The refusal message when a finished file is simply too big for this setup."""
-    limit = summary.get("upload_limit_mb")
-    transport = summary.get("upload_transport")
-
-    if transport == "mtproto":
-        advice = (
-            f"Even the MTProto session tops out at {summary.get('upload_cap_mb')} MB per file (Telegram's own "
-            "ceiling for accounts). Try a lower quality or an audio-only download."
+    """The refusal when a finished file exceeds what Telegram will accept from this bot."""
+    if summary.get("upload_transport") == "mtproto":
+        body = (
+            f"Telegram's ceiling for a bot over MTProto is <b>{summary.get('mtproto_capability_mb')} MB</b>, "
+            "and this is protocol-level — no bot can send more. "
+            "Pick a lower quality, or the audio-only option for very long videos."
         )
     else:
-        advice = (
-            "Pick a lower quality, or enable big uploads: get <code>api_id</code>/<code>api_hash</code> from "
-            "https://my.telegram.org, run <code>python scripts/make_session.py</code> once, then set "
-            "<code>TELEGRAM_API_ID</code>, <code>TELEGRAM_API_HASH</code> and "
-            f"<code>TELEGRAM_SESSION_STRING</code> — that raises the cap to "
-            f"{summary.get('mtproto_cap_mb') or MT_UPLOAD_LIMIT_MB} MB."
+        body = (
+            f"Telegram's Bot API accepts at most <b>{BOT_API_UPLOAD_MB} MB</b> per upload from a bot. "
+            "That ceiling is Telegram's, not this bot's — nothing here lowers it, and it cannot be raised "
+            "through the Bot API at all.\n\n"
+            "<b>One setup change unlocks 2000 MB</b>\n"
+            "Get <code>api_id</code> and <code>api_hash</code> from https://my.telegram.org (API development "
+            "tools) and set them as <code>TELEGRAM_API_ID</code> / <code>TELEGRAM_API_HASH</code>. That lets "
+            "this same bot upload over MTProto, Telegram's own protocol — <b>no login, no phone number, no "
+            "session string</b>."
         )
-
     return (
-        "⚠️ <b>Too large to send</b>\n"
-        f"The result would be about <b>{size_mb:.0f} MB</b> and this bot can send <b>{limit} MB</b>.\n\n{advice}"
+        "⚠️ <b>Too large for Telegram</b>\n"
+        f"The file is about <b>{size_mb:.0f} MB</b> and the limit here is "
+        f"<b>{summary.get('upload_capability_mb')} MB</b>.\n\n{body}"
     )
 
 
@@ -293,47 +298,52 @@ def too_long(duration: float, limit_minutes: int) -> str:
 
 
 def limits_text(summary: dict) -> str:
-    """``/limits`` — the honest number, and the way to raise it."""
-    limit = summary.get("upload_limit_mb")
+    """``/limits`` — what is Telegram's ceiling, what is the host's, and what is not limited."""
+    capability = summary.get("upload_capability_mb")
     transport = summary.get("upload_transport")
-    cap = summary.get("upload_cap_mb") or limit
-
+    mtproto_ready = summary.get("mtproto") != "off"
+    lines = [
+        "📦 <b>Size limits</b>",
+        "",
+        "<b>1 · Downloading — not limited by this bot</b>",
+        "The TypeTube engine streams the whole video: 4K, hours long, any size it offers. "
+        "Nothing in this application caps the download.",
+        "",
+        "<b>2 · Uploading — Telegram decides</b>",
+        f"Transport: {esc(_transport_label(summary))}",
+        f"Largest file this bot can send right now: <b>{capability} MB</b>",
+    ]
     if transport == "mtproto":
-        how = (
-            f"Large files are sent through a <b>Telegram user session</b> (MTProto), because the Bot API stops at "
-            f"{summary.get('api_upload_cap_mb')} MB. This account can upload <b>{cap} MB</b> per file — Telegram's "
-            "ceiling is 2000 MB, or 4000 MB with Premium.\n\n"
-            f"<i>Files up to {summary.get('api_upload_cap_mb')} MB are still delivered straight through the Bot API, "
-            "which is faster.</i>"
-        )
-    elif (summary.get("api_upload_cap_mb") or 0) > 50:
-        how = (
-            f"This bot talks to a <b>self-hosted Bot API server</b>, so files up to <b>{cap} MB</b> can be sent — "
-            "Telegram's ceiling for bots.\n\n"
-            "<i>Premium's 4 GB applies to people uploading in the app, not to bots: to go beyond 2000 MB, add a "
-            "Premium user session instead.</i>"
-        )
+        lines += [
+            "",
+            "MTProto is Telegram's own protocol, authorised with the <b>bot token you already have</b>. "
+            "Its ceiling for bots is 2000 MB — the biggest a bot can ever send, with or without Premium "
+            "(Premium's 4 GB is for people, not bots).",
+        ]
     else:
-        how = (
-            f"Currently <b>{limit} MB</b> — the ceiling for bots on Telegram's cloud API.\n\n"
-            "<b>How to raise it</b>\n"
-            "1 · Get <code>api_id</code> / <code>api_hash</code> from https://my.telegram.org\n"
-            "2 · Run <code>python scripts/make_session.py</code> once to log in\n"
-            "3 · Set <code>TELEGRAM_API_ID</code>, <code>TELEGRAM_API_HASH</code> and "
-            "<code>TELEGRAM_SESSION_STRING</code>\n\n"
-            "Result: up to <b>2000 MB</b> per file, 4000 MB if that account has Premium.\n"
-            "<i>The alternative is a self-hosted Bot API server (<code>TELEGRAM_API_BASE</code>).</i>"
-        )
+        lines += [
+            "",
+            "The Bot API stops bots at 50 MB. Adding two values raises it to 2000 MB:",
+            "1 · https://my.telegram.org → API development tools → <code>api_id</code> / <code>api_hash</code>",
+            "2 · Set <code>TELEGRAM_API_ID</code> and <code>TELEGRAM_API_HASH</code>",
+            "",
+            "<i>These identify the Telegram application; your existing BOT_TOKEN still authorises the bot, so "
+            "there is no login, no phone number and no session string.</i>",
+            "",
+            "Running a local Bot API server (<code>TELEGRAM_API_BASE</code>) also reaches 2000 MB, but needs "
+            "a second service.",
+        ]
+    if mtproto_ready and transport != "mtproto":
+        lines += ["", "<i>MTProto is configured but not selected (UPLOAD_TRANSPORT=bot).</i>"]
 
-    return (
-        "📦 <b>Size limits</b>\n\n"
-        f"<b>Upload cap</b>: {limit} MB\n"
-        f"<b>Transport</b>: {esc(_transport_label(summary))}\n\n"
-        f"{how}\n\n"
-        "<b>Why a cap at all?</b>\n"
-        "Every file is downloaded, muxed and uploaded through this server; the cap keeps a single request from "
-        "filling its disk."
-    )
+    lines += [
+        "",
+        "<b>3 · The host — its own constraint</b>",
+        f"The workspace keeps <b>{summary.get('min_free_disk_mb')} MB</b> free before starting a job; a job "
+        "that would fill the disk is refused rather than half-finished, and partial files are deleted. "
+        "Bigger files need a bigger disk — that is hosting, not policy.",
+    ]
+    return "\n".join(lines)
 
 
 def status_text(summary: dict, active: list[str], free_disk: str) -> str:
@@ -341,7 +351,8 @@ def status_text(summary: dict, active: list[str], free_disk: str) -> str:
         "📊 <b>Status</b>",
         "",
         f"<b>Engine</b>: {esc(str(summary.get('engine')))}",
-        f"<b>Upload cap</b>: {summary.get('upload_limit_mb')} MB · {esc(_transport_label(summary))}",
+        f"<b>Upload</b>: up to {summary.get('upload_capability_mb')} MB per file"
+        f" · {esc(str(summary.get('upload_transport')))}",
         f"<b>Parallel jobs</b>: {summary.get('max_concurrent_jobs')}",
         f"<b>Free disk</b>: {esc(free_disk)}",
         f"<b>Mode</b>: {esc(str(summary.get('mode')))}",

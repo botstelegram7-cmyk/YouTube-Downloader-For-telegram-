@@ -1,8 +1,8 @@
-"""Configuration: defaults, limits and the ways a deploy can be misconfigured.
+"""Configuration: defaults, and the fact that the application sets no size limits.
 
-The upload ceiling gets the most attention, because getting it wrong is invisible until a
-user asks for a big file — and because an over-strict check once took a working deployment
-down instead of warning.
+The interesting assertions here are negative ones — that no setting can lower Telegram's
+ceilings, that no user-session credential exists, and that the capability reported to users
+is the one the chosen transport really has.
 """
 
 from __future__ import annotations
@@ -10,10 +10,10 @@ from __future__ import annotations
 import pytest
 
 from config import (
-    CLOUD_UPLOAD_LIMIT_MB,
-    LOCAL_UPLOAD_LIMIT_MB,
-    MT_PREMIUM_UPLOAD_LIMIT_MB,
-    MT_UPLOAD_LIMIT_MB,
+    BOT_API_UPLOAD_MB,
+    LOCAL_BOT_API_UPLOAD_MB,
+    MB,
+    MT_UPLOAD_MB,
     ConfigError,
     Settings,
     load_settings,
@@ -21,11 +21,7 @@ from config import (
 )
 
 TOKEN = "123456789:" + "A" * 35
-SESSION = {
-    "TELEGRAM_API_ID": "1234567",
-    "TELEGRAM_API_HASH": "0123456789abcdef0123456789abcdef",
-    "TELEGRAM_SESSION_STRING": "BQ" + "x" * 40,
-}
+API_KEY = {"TELEGRAM_API_ID": "1234567", "TELEGRAM_API_HASH": "0123456789abcdef0123456789abcdef"}
 
 
 def build(**env) -> Settings:
@@ -36,106 +32,92 @@ def joined(items) -> str:
     return " | ".join(items)
 
 
-# -- defaults ---------------------------------------------------------------- #
 def test_only_a_token_is_required():
     settings = build()
     assert settings.validate() == []
-    assert settings.upload_limit_mb == CLOUD_UPLOAD_LIMIT_MB
-    assert settings.api_mode == "cloud Bot API"
     assert settings.transport == "bot"
     assert settings.runs_webhook is False
-    assert settings.default_quality == "720p"
     assert settings.notify_chat_id == 0
+    assert settings.max_duration_minutes == 0
 
 
-def test_the_bot_id_comes_from_the_token():
-    assert build().bot_id == 123456789
-    assert load_settings({"BOT_TOKEN": "not-a-token"}).bot_id == 0
+# -- no artificial limits ----------------------------------------------------- #
+def test_there_is_no_variable_that_lowers_the_ceiling():
+    """MAX_UPLOAD_MB is gone: an operator cannot cap file size, and nothing silently clips."""
+    settings = build()
+    for removed in ("max_upload_mb", "upload_limit_mb", "upload_limit_bytes"):
+        assert not hasattr(settings, removed), f"{removed} should not exist"
 
 
-# -- the deploy regression: a too-large ceiling warns, it never aborts --------- #
-def test_a_ceiling_above_the_transport_is_clamped_not_fatal():
-    """MAX_UPLOAD_MB=500 on the cloud API must boot, clamp, and explain itself."""
-    settings = build(MAX_UPLOAD_MB="500")
-
-    assert settings.validate() == [], "an unattainable ceiling must not stop the bot booting"
-    assert settings.upload_limit_mb == CLOUD_UPLOAD_LIMIT_MB
-    assert settings.max_upload_mb == 500, "the requested value is remembered for /status"
-    assert "clamped" in joined(settings.warnings())
+def test_the_capability_is_telegram_s_own_number():
+    assert build().upload_capability_mb == BOT_API_UPLOAD_MB
+    assert build(**API_KEY).upload_capability_mb == MT_UPLOAD_MB
+    assert build(TELEGRAM_API_BASE="http://api.local:8081").upload_capability_mb == LOCAL_BOT_API_UPLOAD_MB
+    assert build().upload_capability_bytes == BOT_API_UPLOAD_MB * MB
 
 
-def test_a_huge_ceiling_is_clamped_to_what_is_possible():
-    assert build(MAX_UPLOAD_MB="999999").upload_limit_mb == CLOUD_UPLOAD_LIMIT_MB
+def test_a_local_bot_api_server_is_the_bot_api_ceiling_not_a_policy():
+    settings = build(TELEGRAM_API_BASE="http://telegram-bot-api:8081")
+    assert settings.uses_local_api is True
+    assert settings.bot_api_capability_mb == LOCAL_BOT_API_UPLOAD_MB
+    assert settings.api_mode == "local Bot API server"
 
 
-def test_a_smaller_ceiling_is_honoured_exactly():
-    assert build(MAX_UPLOAD_MB="20").upload_limit_mb == 20
-
-
-# -- MTProto: the 2 GB route ------------------------------------------------- #
-def test_a_session_raises_the_ceiling_and_the_transport():
-    settings = build(**SESSION, MAX_UPLOAD_MB="500")
-
+# -- MTProto with the bot token, and nothing else ----------------------------- #
+def test_api_id_and_hash_enable_mtproto_without_any_login():
+    settings = build(**API_KEY)
     assert settings.mtproto_ready is True
     assert settings.transport == "mtproto"
-    assert settings.mtproto_cap_mb == MT_UPLOAD_LIMIT_MB
-    assert settings.upload_cap_mb == MT_UPLOAD_LIMIT_MB
-    assert settings.upload_limit_mb == 500, "the requested ceiling is reachable now"
+    assert settings.mtproto_capability_mb == MT_UPLOAD_MB
     assert settings.validate() == []
 
 
-def test_without_an_explicit_ceiling_a_session_allows_two_gigabytes():
-    assert build(**SESSION).upload_limit_mb == MT_UPLOAD_LIMIT_MB
+def test_no_user_session_credential_exists():
+    """The old design asked for a logged-in account; this one must never need it."""
+    settings = build(**API_KEY)
+    for removed in ("session_string", "storage_chat_id", "mt_premium", "max_upload_mb"):
+        assert not hasattr(settings, removed), f"{removed} should not exist"
 
 
-def test_premium_raises_the_session_ceiling_to_four_gigabytes():
-    settings = build(**SESSION, MT_PREMIUM_ACCOUNT="1")
-    assert settings.mtproto_cap_mb == MT_PREMIUM_UPLOAD_LIMIT_MB
-    assert settings.upload_limit_mb == MT_PREMIUM_UPLOAD_LIMIT_MB
-
-
-def test_the_alternative_spellings_of_the_credentials_work():
-    settings = load_settings(
-        {
-            "BOT_TOKEN": TOKEN,
-            "API_ID": SESSION["TELEGRAM_API_ID"],
-            "API_HASH": SESSION["TELEGRAM_API_HASH"],
-            "SESSION_STRING": SESSION["TELEGRAM_SESSION_STRING"],
-        }
-    )
+def test_the_alternative_spellings_of_the_api_key_work():
+    settings = load_settings({"BOT_TOKEN": TOKEN, "API_ID": "1234567", "API_HASH": "abcdef"})
     assert settings.mtproto_ready is True
 
 
-def test_a_half_configured_session_is_reported_with_the_missing_name():
-    problems = build(TELEGRAM_API_ID=SESSION["TELEGRAM_API_ID"]).validate()
-    assert any("TELEGRAM_SESSION_STRING" in problem for problem in problems)
+def test_a_half_configured_key_pair_is_named_in_the_error():
+    problems = build(TELEGRAM_API_ID="1234567").validate()
     assert any("TELEGRAM_API_HASH" in problem for problem in problems)
+    assert any("no user account" in problem for problem in problems)
 
 
-def test_forcing_mtproto_without_credentials_falls_back_and_warns():
+def test_forcing_mtproto_without_credentials_falls_back_to_the_bot_api():
     settings = build(UPLOAD_TRANSPORT="mtproto")
     assert settings.transport == "bot"
-    assert "incomplete" in joined(settings.warnings())
+    assert settings.upload_capability_mb == BOT_API_UPLOAD_MB
+    assert "UPLOAD_TRANSPORT=mtproto was requested" in joined(settings.warnings())
 
 
 def test_an_unknown_transport_is_refused():
-    problems = build(UPLOAD_TRANSPORT="carrier-pigeon").validate()
-    assert any("UPLOAD_TRANSPORT" in problem for problem in problems)
+    assert any("UPLOAD_TRANSPORT" in problem for problem in build(UPLOAD_TRANSPORT="pigeon").validate())
 
 
-def test_connection_count_is_bounded():
+def test_connection_count_is_bounded_by_telegram():
     assert build(MT_CONNECTIONS="8").mt_connections == 8
     with pytest.raises(ConfigError):
         build(MT_CONNECTIONS="99")
 
 
-# -- local Bot API server: the alternative route ------------------------------ #
-def test_a_local_bot_api_server_raises_the_bot_api_ceiling():
-    settings = build(TELEGRAM_API_BASE="http://telegram-bot-api:8081")
-    assert settings.uses_local_api is True
-    assert settings.api_upload_cap_mb == LOCAL_UPLOAD_LIMIT_MB
-    assert settings.upload_limit_mb == LOCAL_UPLOAD_LIMIT_MB
-    assert settings.api_mode == "local Bot API server"
+# -- the host's constraint is separate ---------------------------------------- #
+def test_disk_headroom_is_a_hosting_knob_not_a_file_cap():
+    settings = build(MIN_FREE_DISK_MB="1024")
+    assert settings.min_free_disk_mb == 1024
+    assert settings.min_free_disk_bytes == 1024 * MB
+    assert "very low" in joined(build(MIN_FREE_DISK_MB="32").warnings())
+
+
+def test_duration_limit_defaults_to_unlimited():
+    assert build().max_duration_minutes == 0
+    assert build(MAX_DURATION_MINUTES="90").max_duration_minutes == 90
 
 
 # -- validation and secrets --------------------------------------------------- #
@@ -154,9 +136,7 @@ def test_webhook_detection_and_target():
     settings = build(WEBHOOK_URL="https://bot.example.com/")
     assert settings.runs_webhook is True
     assert settings.webhook_target == "https://bot.example.com/telegram"
-
-    render = build(RENDER_EXTERNAL_URL="https://render.example.com")
-    assert render.runs_webhook is True
+    assert build(RENDER_EXTERNAL_URL="https://render.example.com").runs_webhook is True
 
 
 def test_polling_can_be_forced():
@@ -167,22 +147,22 @@ def test_a_bad_log_level_is_a_problem():
     assert "LOG_LEVEL" in joined(build(LOG_LEVEL="LOUD").validate())
 
 
-def test_the_summary_shows_the_transport_and_never_a_secret():
-    settings = build(**SESSION, MAX_UPLOAD_MB="1500")
+def test_the_summary_reports_capabilities_and_never_a_secret():
+    settings = build(**API_KEY)
     summary = settings.summary()
 
     assert summary["upload_transport"] == "mtproto"
-    assert summary["mtproto"] == "ready"
-    assert summary["upload_limit_mb"] == 1500
-    assert summary["upload_cap_mb"] == MT_UPLOAD_LIMIT_MB
+    assert summary["upload_capability_mb"] == MT_UPLOAD_MB
+    assert summary["bot_api_capability_mb"] == BOT_API_UPLOAD_MB
+    assert summary["mtproto"] == "ready (bot token)"
 
     rendered = repr(summary)
-    assert SESSION["TELEGRAM_API_HASH"] not in rendered
-    assert SESSION["TELEGRAM_SESSION_STRING"] not in rendered
     assert TOKEN not in rendered
+    assert API_KEY["TELEGRAM_API_HASH"] not in rendered
 
 
-def test_warnings_never_pretend_the_limit_is_higher_than_it_is():
+def test_warnings_explain_how_to_raise_the_ceiling_without_a_login():
     notes = joined(build().warnings())
-    assert "50 MB" in notes
-    assert "TELEGRAM_SESSION_STRING" in notes
+    assert f"{BOT_API_UPLOAD_MB} MB" in notes
+    assert "TELEGRAM_API_ID" in notes
+    assert "session string" not in notes.lower().replace("no session string", "")

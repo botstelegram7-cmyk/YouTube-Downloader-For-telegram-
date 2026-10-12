@@ -5,10 +5,14 @@
 # limits (30 messages/second globally, ~1 per second per chat).
 python-telegram-bot[rate-limiter]==22.8
 
-# MTProto user session: the route to Telegram's 2000 MB per-file upload limit
-# (4000 MB with Premium). Pyrofork is the maintained Pyrogram fork, imported as
-# `pyrogram`. Downloading is done by the TypeTube CLI, not by Python.
+# MTProto — the route to Telegram's 2000 MB per-file upload limit, authorised with the
+# bot token. Pyrofork is the maintained Pyrogram fork, imported as `pyrogram`.
+# Downloading is done by the TypeTube CLI, not by Python.
 pyrofork>=2.3.69,<2.4
+
+# MTProto crypto in C instead of pure Python: Pyrogram logs "TgCrypto is missing" and
+# slows large uploads down noticeably without it. Installs the `tgcrypto` module.
+PyroTgCrypto>=1.2.7,<2
 
 # HTTP server for the webhook + /health endpoint of the Web Service deployment.
 aiohttp>=3.10,<4
