@@ -4,6 +4,62 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 semantic versioning for its configuration surface and behaviour.
 
+## [3.3.3] — 2026-10-12
+
+**Torrents, magnets and direct links; a status card that reports time and speed; and a
+`/start` that says only what a stranger needs to know.**
+
+### Added
+
+* **Torrents and magnet links.** Send a `magnet:` link or a `.torrent` URL: the bot fetches
+  the *metadata only*, lists the files it really contains with their real sizes (largest
+  video first, samples and `.nfo` scenery last) and downloads just the one you tap —
+  `aria2c --select-file`, then `--seed-time=0`, so nothing is seeded afterwards. A magnet
+  with no peers answers with a plain explanation instead of hanging.
+* **Direct file links.** Any `http(s)` URL: the server is asked what it is (name, size,
+  type) with a real `Range` request, you confirm, and aria2 fetches it with 16 parallel
+  connections. Video and audio arrive playable; anything else arrives as a document.
+* **Live speed and ETA on every job.** `📦 412 MB / 1.2 GB · ⚡ 8.4 MB/s · ⏳ ETA 2:18`,
+  read from the engine's own output and from the bytes really on disk. The ETA only appears
+  when a total size is known, because otherwise it would be a guess.
+* **`/diag` reports the fetcher**, and `main.py --check` names it (a missing `aria2c` is a
+  warning, not a failure: YouTube downloads do not need it).
+
+### Changed
+
+* **`/start` is short and public.** It shows the picture, what the bot accepts (YouTube ·
+  torrent · direct) and two shortcuts — no engine name, no size ceilings, no command dump,
+  and no owner id (`SHOW_OWNER_IN_START=false` by default now). The command cheat sheet
+  lives in `/help`, `/limits` keeps the ceilings, and `/diag` is not advertised to anyone but
+  the owner (it is published in the owner's private command scope only).
+* **Status edits are spaced by at least `PROGRESS_MIN_INTERVAL` (5 s).** Telegram allows
+  about one message per second per chat; the floor keeps a busy bot well clear of the limit.
+  The first update that carries real numbers is always shown immediately, so a short job
+  still shows its speed and ETA instead of "Starting…" until it finishes.
+* **What a file *is* is decided by ffprobe, not by its name.** Random bytes named `.mp4`
+  make ffprobe report a `bintext` 1280×3200 "video": that guess is no longer trusted, and a
+  file with no readable media is delivered as a document without invented dimensions,
+  duration or thumbnail. Real MP4s are still recognised through ffprobe's container list
+  (`mov,mp4,m4a,3gp,3g2,mj2`), and audio-only containers are not mistaken for video.
+* Every expected job failure is now named in the log (`Job <id> failed (<type>): <reason>`),
+  and a link that cannot be read is logged with the reason instead of only being refused in
+  chat.
+
+### Fixed
+
+* **A link can no longer point inside the server's own network.** Loopback, private,
+  link-local, reserved and multicast addresses (and `localhost`, `*.internal`,
+  `metadata.google.internal`) are refused before anything is fetched. `ALLOW_PRIVATE_LINKS=true`
+  turns that off for local testing.
+* IPv6 URLs are no longer truncated at the closing bracket, so `http://[::1]/x` is refused as
+  a private address instead of being misread as `http://[::1`.
+
+### Security note
+
+A bot that will fetch any URL a stranger sends is a request-forgery tool aimed at whatever
+network it runs in. That is why the address guard above is on by default, and why it is
+documented in `.env.example` rather than left implicit.
+
 ## [3.3.2] — 2026-10-12
 
 **"Bot went offline after /start", the slow download path, and a bot anyone can use.**

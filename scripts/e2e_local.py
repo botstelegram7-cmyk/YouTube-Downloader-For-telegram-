@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -59,6 +60,10 @@ def _find_repo_root() -> Path:
 
 
 ROOT = _find_repo_root()
+# The torrent step builds a real .torrent with the bot's own encoder, so the checkout has to
+# be importable from this process too.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 TOKEN = "123456789:placeholder-token-used-only-by-the-e2e-harness"
 #: A real YouTube-shaped link — the bot refuses anything else before it reaches the engine.
 LINK = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
@@ -400,12 +405,49 @@ def update_message(text: str, *, user_id: int = USER_ID, update_id: int = 1, mes
     return {"update_id": update_id, "message": message}
 
 
-def update_callback(data: str, message_id: int) -> dict:
+def write_torrent(workdir: Path, media: Path, base_url: str) -> Path:
+    """Build a single-file torrent for the test clip, seeded by an HTTP server.
+
+    No tracker and no peers are involved: the ``url-list`` entry is a BEP-19 web seed, which
+    is also how a magnet with no seeders still completes. That keeps this run hermetic —
+    nothing leaves the machine.
+    """
+    from bot.torrent import bencode
+
+    payload = media.read_bytes()
+    piece = 1024 * 1024
+    hashes = b"".join(
+        hashlib.sha1(payload[i : i + piece]).digest()
+        for i in range(0, len(payload), piece)
+    )
+    torrent = bencode(
+        {
+            "announce": "http://127.0.0.1:1/announce",  # deliberately dead tracker
+            "url-list": [f"{base_url}/{media.name}"],
+            "info": {
+                "name": media.name,
+                "piece length": piece,
+                "pieces": hashes,
+                "length": len(payload),
+            },
+        }
+    )
+    path = workdir / "clip.torrent"
+    path.write_bytes(torrent)
+    return path
+
+
+def update_callback(data: str, message_id: int, *, user_id: int = USER_ID, update_id: int = 2) -> dict:
+    """A button press.
+
+    ``user_id`` matters: every cached choice (a quality, a torrent's file list) is scoped to
+    the user who made it, so a button pressed by the wrong account is refused.
+    """
     return {
-        "update_id": 2,
+        "update_id": update_id,
         "callback_query": {
             "id": "1",
-            "from": {"id": USER_ID, "is_bot": False, "first_name": "E2E"},
+            "from": {"id": user_id, "is_bot": False, "first_name": "E2E"},
             "chat_instance": "1",
             "data": data,
             "message": {
@@ -425,6 +467,11 @@ async def run(args: argparse.Namespace) -> int:
         fail("FFmpeg is required for this check (install it, or pass --ffmpeg)")
         return 2
 
+    aria2 = args.aria2 or shutil.which("aria2c")
+    if not aria2:
+        fail("aria2c is required for the torrent and direct-link steps (install aria2, or pass --aria2)")
+        return 2
+
     workdir = Path(tempfile.mkdtemp(prefix="ytbot-e2e-"))
     downloads = workdir / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
@@ -432,6 +479,7 @@ async def run(args: argparse.Namespace) -> int:
 
     log(f"Workspace: {workdir}")
     log(f"FFmpeg: {ffmpeg}")
+    log(f"aria2c: {aria2}")
 
     session: ClientSession | None = None
     bot_process: subprocess.Popen | None = None
@@ -443,6 +491,22 @@ async def run(args: argparse.Namespace) -> int:
         ok(f"test video built ({video.stat().st_size / 1024:.0f} KB, 320×240, 3 s)")
         stub = write_engine_stub(workdir, video, STUB_TITLE)
         ok(f"engine stub ready ({stub.name})")
+
+        # 2a. a fixture server: the file a direct link points at, and the web seed a
+        # torrent pulls from. Both steps are hermetic — nothing leaves this machine.
+        fixture_root = workdir / "fixtures"
+        fixture_root.mkdir(exist_ok=True)
+        shutil.copy(video, fixture_root / video.name)
+        (fixture_root / "notes.bin").write_bytes(os.urandom(64_000))
+        fixtures = web.Application()
+        fixtures.router.add_static("/", fixture_root, show_index=True)
+        fixture_runner = web.AppRunner(fixtures, access_log=None)
+        await fixture_runner.setup()
+        fixture_port = args.api_port + 10
+        await web.TCPSite(fixture_runner, "127.0.0.1", fixture_port).start()
+        runners.append(fixture_runner)
+        fixture_base = f"http://127.0.0.1:{fixture_port}"
+        ok(f"fixture server on :{fixture_port} ({video.name}, notes.bin)")
 
         # 2. mock Bot API ----------------------------------------------------
         mock = MockBotAPI()
@@ -471,6 +535,7 @@ async def run(args: argparse.Namespace) -> int:
             # The engine is the stub above, invoked exactly like the real CLI.
             "TYPETUBE_BIN": str(stub),
             "TYPETUBE_WORKERS": "2",
+            "ARIA2_BINARY": aria2,
             "E2E_STUB_SOURCE": str(video),
             "E2E_STUB_TITLE": STUB_TITLE,
             "MAX_CONCURRENT_JOBS": "1",
@@ -478,7 +543,9 @@ async def run(args: argparse.Namespace) -> int:
             "STARTUP_NOTIFY_CHAT_ID": str(CHAT_ID),
             # The operator: only this id may use /diag, and it is never throttled.
             "OWNER_USER_ID": str(OWNER_USER_ID),
-            "LOG_LEVEL": "INFO",
+            # Torrent and direct-link steps fetch from a server on 127.0.0.1 in this harness.
+            "ALLOW_PRIVATE_LINKS": "true",
+            "LOG_LEVEL": os.environ.get("E2E_LOG_LEVEL", "INFO"),
             "LOG_PRETTY": "false",
             "PYTHONUNBUFFERED": "1",
         }
@@ -595,18 +662,24 @@ async def run(args: argparse.Namespace) -> int:
             fail("add-to-group link missing from /start")
         else:
             ok("the /start keyboard offers adding the bot to a group")
-        if "Owner" not in caption:
-            failures.append("the /start caption does not credit the owner")
-            fail("owner credit missing from /start")
+        # The welcome screen is deliberately short: no owner id, no engine name, no size
+        # ceilings, no command dump — and it advertises every source the bot accepts.
+        banned = ["Owner", "TypeTube", "FFmpeg", "MB per file", "/diag", "Commands"]
+        leaked = [word for word in banned if word in caption]
+        if leaked:
+            failures.append(f"the /start caption mentions {leaked}")
+            fail(f"/start mentions {leaked}")
         else:
-            ok(f"the /start caption credits the owner ({caption.split('Owner</b>: ')[-1].splitlines()[0]})")
-        if "/diag" not in caption or len(caption) > 1024:
-            shortcuts = [call for call in mock.calls_of("sendMessage") if "/diag" in str(call["fields"].get("text", ""))]
-            if shortcuts:
-                ok("the command list follows the picture as its own message")
-            else:
-                failures.append("the /start shortcuts went missing")
-                fail("the command list never arrived")
+            ok("the /start caption stays out of engines, limits, commands and the owner")
+        for kind in ("YouTube", "Torrent", "Direct"):
+            if kind not in caption:
+                failures.append(f"the /start caption does not mention {kind}")
+                fail(f"/start does not advertise {kind}")
+        else:
+            ok("the /start caption advertises YouTube, torrents and direct links")
+        if len(caption) > 1024:
+            failures.append("the /start caption is longer than Telegram allows")
+            fail("the /start caption exceeds 1024 characters")
 
         # 3c. /diag is owner-only --------------------------------------------
         log(f"Sending /diag as a normal user ({USER_ID})")
@@ -664,6 +737,7 @@ async def run(args: argparse.Namespace) -> int:
 
         # 4. send a link ------------------------------------------------------
         log(f"Sending a link: {LINK}")
+        mark = len(mock.calls)
         await post_webhook(
             session,
             f"{webhook_url}/telegram",
@@ -673,7 +747,7 @@ async def run(args: argparse.Namespace) -> int:
         keyboard_calls = await wait_for(
             lambda: [
                 call
-                for call in mock.calls
+                for call in mock.calls[mark:]
                 if call["method"] in ("sendMessage", "editMessageText") and "dl:" in str(call["fields"])
             ],
             timeout=90,
@@ -691,7 +765,11 @@ async def run(args: argparse.Namespace) -> int:
 
         # 5. press the first quality button -----------------------------------
         log(f"Pressing “{buttons[0]['text']}”")
-        await post_webhook(session, f"{webhook_url}/telegram", update_callback(callback_data[0], 2001))
+        await post_webhook(
+            session,
+            f"{webhook_url}/telegram",
+            update_callback(callback_data[0], 2001, user_id=OWNER_USER_ID, update_id=21),
+        )
 
         delivered = await wait_for(
             lambda: [c for c in mock.calls if c["method"] in ("sendVideo", "sendAudio", "sendDocument")],
@@ -742,6 +820,139 @@ async def run(args: argparse.Namespace) -> int:
 
         check(bool(mock.calls_of("deleteMessage")), "status message cleaned up after delivery")
 
+        # The status card must carry real numbers: a bar, a speed and — when the total size
+        # is known — an ETA. Both are read from the engine's own output, never invented.
+        captions = [
+            str(call["fields"].get("caption", ""))
+            for call in mock.calls
+            if call["method"] in ("editMessageCaption", "editMessageText")
+        ]
+        live = [text for text in captions if "⚡" in text]
+        check(bool(live), "the status card reports a live speed")
+        check(
+            any("⏳ ETA" in text for text in captions),
+            "the status card reports an ETA once the total size is known",
+        )
+        check(
+            any("📦" in text and "/" in text for text in captions),
+            "the status card shows progress against the total size",
+        )
+
+        # 6b. a direct link -------------------------------------------------- #
+        log("Sending a direct file link")
+        await post_webhook(
+            session,
+            f"{webhook_url}/telegram",
+            update_message(
+                f"{fixture_base}/notes.bin", user_id=OWNER_USER_ID, update_id=17, message_id=18
+            ),
+        )
+        confirm = await wait_for(
+            lambda: [
+                call
+                for call in mock.calls
+                if call["method"] == "editMessageText"
+                and "Direct download" in str(call["fields"].get("text", ""))
+            ],
+            timeout=60,
+            what="the direct-link confirmation",
+            abort=bot_is_gone,
+        )
+        markup = json.loads(str(confirm[-1]["fields"].get("reply_markup")))
+        buttons = [button for row in markup["inline_keyboard"] for button in row]
+        direct_buttons = [b for b in buttons if b["callback_data"].startswith("dd:")]
+        if not direct_buttons:
+            failures.append("the direct link offered no download button")
+            fail("the direct link offered no download button")
+        else:
+            confirmed = str(confirm[-1]["fields"]["text"])
+            announced = [line for line in confirmed.splitlines() if line.startswith("📦")]
+            ok(f"direct link confirmed with the size it announced ({announced[0] if announced else 'none'})")
+            before = len(mock.calls)
+            await post_webhook(
+                session,
+                f"{webhook_url}/telegram",
+                update_callback(direct_buttons[0]["callback_data"], 2001, user_id=OWNER_USER_ID, update_id=22),
+            )
+            downloaded = await wait_for(
+                lambda: [
+                    call
+                    for call in mock.calls[before:]
+                    if call["method"] in ("sendDocument", "sendVideo", "sendAudio")
+                ],
+                timeout=180,
+                what="the direct-downloaded file",
+                abort=bot_is_gone,
+            )
+            call = downloaded[0]
+            if call["method"] != "sendDocument":
+                failures.append(f"a .bin file should arrive as a document, not {call['method']}")
+                fail(f"a .bin file arrived as {call['method']}")
+            else:
+                uploaded = [f for f in call["files"] if f.startswith("document:")]
+                if uploaded:
+                    ok(f"direct link delivered as a document ({uploaded[0].split(':')[1]} bytes)")
+                else:
+                    failures.append("the direct download uploaded no bytes")
+                    fail("the direct download uploaded no bytes")
+
+        # 6c. a torrent ------------------------------------------------------ #
+        # The .torrent must be served by the fixture server, since the bot fetches it by URL.
+        torrent_file = write_torrent(fixture_root, video, fixture_base)
+        log(f"Sending a torrent URL ({torrent_file.name})")
+        await post_webhook(
+            session,
+            f"{webhook_url}/telegram",
+            update_message(f"{fixture_base}/{torrent_file.name}", user_id=OWNER_USER_ID, update_id=19, message_id=20),
+        )
+        picker = await wait_for(
+            lambda: [
+                call
+                for call in mock.calls
+                if call["method"] == "editMessageText" and "tf:" in str(call["fields"].get("reply_markup"))
+            ],
+            timeout=120,
+            what="the torrent file list",
+            abort=bot_is_gone,
+        )
+        markup = json.loads(str(picker[-1]["fields"]["reply_markup"]))
+        buttons = [button for row in markup["inline_keyboard"] for button in row]
+        torrent_data = [b for b in buttons if b["callback_data"].startswith("tf:")]
+        if not torrent_data:
+            failures.append("the torrent offered no files")
+            fail("the torrent offered no files")
+        else:
+            ok(f"torrent listed its file(s): {', '.join(b['text'] for b in buttons[:3])}")
+            before = len(mock.calls)
+            await post_webhook(
+                session,
+                f"{webhook_url}/telegram",
+                update_callback(torrent_data[0]["callback_data"], 2001, user_id=OWNER_USER_ID, update_id=23),
+            )
+            fetched = await wait_for(
+                lambda: [
+                    call
+                    for call in mock.calls[before:]
+                    if call["method"] in ("sendVideo", "sendDocument", "sendAudio")
+                ],
+                timeout=300,
+                what="the torrent file",
+                abort=bot_is_gone,
+            )
+            call = fetched[0]
+            uploaded = [
+                f for f in call["files"] if f.split(":")[0] in ("video", "document", "audio")
+            ]
+            bytes_sent = int(uploaded[0].split(":")[1]) if uploaded else 0
+            check_torrent = bytes_sent == video.stat().st_size
+            if check_torrent:
+                ok(f"torrent file downloaded and delivered ({call['method']}, {bytes_sent} bytes)")
+            else:
+                failures.append(
+                    f"the torrent delivered {bytes_sent} bytes, expected {video.stat().st_size}"
+                )
+                fail(f"torrent size mismatch: {bytes_sent} != {video.stat().st_size}")
+
         # 7. graceful shutdown ------------------------------------------------
         log("Sending SIGTERM")
         bot_process.send_signal(signal.SIGTERM)
@@ -750,6 +961,11 @@ async def run(args: argparse.Namespace) -> int:
         except subprocess.TimeoutExpired:
             bot_process.kill()
             failures.append("the bot did not exit within 30s of SIGTERM")
+
+        # Telegram allows about one edit per second per chat. The floor is 5 s by default,
+        # so a job that ran for T seconds must not have produced anything close to T edits.
+        edits = len([c for c in mock.calls if c["method"] in ("editMessageCaption", "editMessageText")])
+        check(edits < 40, f"status edits stayed throttled ({edits} edits for the whole run)")
 
         log_text = log_path.read_text(errors="replace")
         check("Stopped. Goodbye." in log_text, "graceful shutdown logged")
@@ -839,6 +1055,11 @@ async def run(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local end-to-end check (no Telegram account needed)")
     parser.add_argument("--ffmpeg", default=os.getenv("FFMPEG_BINARY", ""), help="path to the ffmpeg binary")
+    parser.add_argument(
+        "--aria2",
+        default=os.getenv("ARIA2_BINARY", ""),
+        help="path to the aria2c binary (torrents and direct links)",
+    )
     parser.add_argument("--api-port", type=int, default=8091, help="port for the mock Bot API")
     parser.add_argument("--bot-port", type=int, default=8093, help="port the bot's webhook server listens on")
     parser.add_argument("--keep-files", action="store_true", help="keep the workspace and logs")

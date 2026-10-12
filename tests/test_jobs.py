@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-from bot.jobs import JobManager
+from bot.jobs import JobManager, Request
 from bot.qualities import build_options, find_option
 from bot.typetube import Stream, Track
 from bot.utils import make_temp_dir
@@ -87,13 +87,15 @@ def make_manager(monkeypatch, *, hold: float = 30.0) -> tuple[JobManager, FakeBo
 
 async def start(manager: JobManager, *, user_id: int = 1, key: str = "best", message_id: int = 5):
     return await manager.start_job(
-        chat_id=user_id,
-        user_id=user_id,
-        url=TRACK.url,
-        option=find_option(OPTIONS, key),
-        title=TRACK.title,
-        token="tok12345",
-        track=TRACK,
+        Request(
+            chat_id=user_id,
+            user_id=user_id,
+            url=TRACK.url,
+            option=find_option(OPTIONS, key),
+            title=TRACK.title,
+            token="tok12345",
+            track=TRACK,
+        ),
         reply_to_message_id=1,
         status_message=FakeMessage(message_id),
     )

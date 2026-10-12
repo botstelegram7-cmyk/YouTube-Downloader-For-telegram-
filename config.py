@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-VERSION = "3.3.2"
+VERSION = "3.3.3"
 PROJECT_NAME = "YouTube Downloader for Telegram"
 
 # --------------------------------------------------------------------------- #
@@ -216,11 +216,28 @@ class Settings:
     user_cooldown_seconds: int = 5
     #: Start image and animated progress message instead of plain text.
     rich_messages: bool = True
+    #: Show the operator's credit line on /start. Off by default: a public bot does not
+    #: advertise an owner id to strangers, and the owner already knows who they are.
+    show_owner_in_start: bool = False
     #: Where Telegram's file_ids for the bot's own images are cached. Defaults to a hidden
     #: file in the download workspace; point it at a mounted volume to survive restarts.
     asset_cache_path: str = ""
 
-    # 3. Engine (TypeTube) --------------------------------------------------
+    #: Seconds between status-message edits while a job runs. Telegram allows roughly one
+    #: edit per second per chat, and the operator asked for a 5 s floor: fewer edits, no
+    #: rate limits, still live. The floor that matters is enforced here.
+    progress_min_interval: float = 5.0
+
+    # 3. Fetcher (aria2) — torrents and direct links -------------------------
+    aria2_path: str = "aria2c"
+    #: How long to wait for peers to hand over a magnet link's metadata.
+    torrent_metadata_timeout: int = 180
+    #: Refuse links that point at the server's own network (loopback, private ranges,
+    #: cloud metadata endpoints). A public bot that fetches any URL a stranger sends is a
+    #: request-forgery tool; turn this on only for local testing.
+    allow_private_links: bool = False
+
+    # 4. Engine (TypeTube) --------------------------------------------------
     typetube_bin: str = "typetube"
     typetube_api_key: str = ""
     typetube_host: str = ""
@@ -395,6 +412,7 @@ class Settings:
             min_free_disk_mb=_int("MIN_FREE_DISK_MB", 256, minimum=0),
             user_cooldown_seconds=_int("USER_COOLDOWN_SECONDS", 5, minimum=0, maximum=3600),
             rich_messages=_bool("RICH_MESSAGES", True),
+            show_owner_in_start=_bool("SHOW_OWNER_IN_START", False),
             asset_cache_path=_str("ASSET_CACHE_PATH"),
             # MTProto, authorised with the bot token (both spellings are accepted)
             api_id=_int("TELEGRAM_API_ID", 0, minimum=0) or _int("API_ID", 0, minimum=0),
@@ -406,6 +424,10 @@ class Settings:
             typetube_api_key=_str("TYPETUBE_API_KEY"),
             typetube_host=_str("TYPETUBE_HOST"),
             # 0 = decide from the CPU budget the host actually gives us (see bot.utils.cpu_budget).
+            progress_min_interval=_float("PROGRESS_MIN_INTERVAL", 5.0, minimum=0.5),
+            aria2_path=_tool("ARIA2_BINARY", "aria2c"),
+            torrent_metadata_timeout=_int("TORRENT_METADATA_TIMEOUT", 180, minimum=30),
+            allow_private_links=_bool("ALLOW_PRIVATE_LINKS", False),
             typetube_workers=_int("TYPETUBE_WORKERS", 0, minimum=0, maximum=32),
             typetube_chunk_mb=_int("TYPETUBE_CHUNK_MB", 10, minimum=1, maximum=64),
             node_binary=_tool("NODE_BINARY", "node"),
@@ -584,9 +606,12 @@ class Settings:
             "owner_username": self.owner_username or "-",
             "public_bot": not (self.owner_user_id or self.owner_username),
             "rich_messages": self.rich_messages,
+            "show_owner_in_start": self.show_owner_in_start,
             "user_cooldown_seconds": self.user_cooldown_seconds,
             "mt_connections": self.mt_connections,
             "typetube_workers": self.typetube_workers or "auto",
+            "progress_min_interval": self.progress_min_interval,
+            "aria2": self.aria2_path,
             "webhook_secret": "set" if self.webhook_secret else "none",
         }
 

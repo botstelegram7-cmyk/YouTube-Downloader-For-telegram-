@@ -1,6 +1,14 @@
 """Handler modules: commands, incoming links, button presses, errors."""
 
-from bot.handlers.callbacks import abort_callback, cancel_callback, nav_callback, quality_callback
+from bot.handlers.callbacks import (
+    abort_callback,
+    cancel_callback,
+    direct_callback,
+    nav_callback,
+    quality_callback,
+    retry_callback,
+    torrent_file_callback,
+)
 from bot.handlers.commands import (
     about_command,
     cancel_command,
@@ -12,7 +20,7 @@ from bot.handlers.commands import (
     status_command,
 )
 from bot.handlers.errors import on_error
-from bot.handlers.links import on_link
+from bot.handlers.links import on_link, reoffer
 
 __all__ = [
     "abort_callback",
@@ -20,6 +28,7 @@ __all__ = [
     "cancel_callback",
     "cancel_command",
     "diag_command",
+    "direct_callback",
     "help_command",
     "id_command",
     "limits_command",
@@ -27,6 +36,9 @@ __all__ = [
     "on_error",
     "on_link",
     "quality_callback",
+    "reoffer",
+    "retry_callback",
     "start_command",
     "status_command",
+    "torrent_file_callback",
 ]

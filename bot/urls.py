@@ -18,7 +18,9 @@ from __future__ import annotations
 import re
 from urllib.parse import parse_qs, urlparse
 
-URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
+#: Literal IPv6 hosts are matched as a unit, so ``http://[::1]/x`` is not truncated at the
+#: closing bracket; everything else stops at whitespace, angle brackets or a stray bracket.
+URL_RE = re.compile(r"https?://(?:\[[0-9A-Fa-f:.]+\]|[^\s<>\"')\]]+)", re.IGNORECASE)
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 #: Hosts whose paths are understood (``www.`` is optional on all of them).

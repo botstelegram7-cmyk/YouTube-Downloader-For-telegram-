@@ -33,27 +33,33 @@ async def _reply(update: Update, text: str, **kwargs):
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """The introduction: a real picture, the shortcuts, and what the bot can do."""
+    """The introduction: a picture, what the bot takes, and a couple of shortcuts.
+
+    No command cheat sheet, no engine name, no size ceilings — that is what ``/help`` and
+    ``/limits`` are for. The operator's credit is opt-in (``SHOW_OWNER_IN_START``).
+    """
     rt = runtime(context)
     message = update.effective_message
     if message is None:
         return
 
-    welcome = texts.welcome(PROJECT_NAME, VERSION, owner=rt.owner_label)
-    commands = texts.commands_list()
-    combined = f"{welcome}\n{commands}"
-    markup = keyboards.welcome_keyboard(bot_username=rt.bot_username, owner_username=rt.settings.owner_username)
+    show_owner = rt.settings.show_owner_in_start
+    text = texts.welcome(
+        PROJECT_NAME, VERSION, owner=rt.owner_label, show_owner=show_owner
+    )
+    markup = keyboards.welcome_keyboard(
+        bot_username=rt.bot_username,
+        owner_username=rt.settings.owner_username,
+        show_owner=show_owner,
+    )
 
     asset = rt.assets.get("start.jpg") if rt.assets is not None else None
     if asset is not None and rt.settings.rich_messages:
         photo = rt.assets.file_id(asset.name) or InputFile(asset.bytes(), filename=asset.name)
-        # A picture caption is capped at 1024 characters, and the greeting plus the command
-        # list is longer than that: the greeting rides on the picture, the list follows it.
-        caption = combined if len(combined) <= CAPTION_LIMIT else welcome[:CAPTION_LIMIT]
         try:
             sent = await message.reply_photo(
                 photo=photo,
-                caption=caption,
+                caption=text[:CAPTION_LIMIT],
                 parse_mode=HTML,
                 reply_markup=markup,
             )
@@ -61,27 +67,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             photos = getattr(sent, "photo", None) or []
             if photos:
                 rt.assets.remember(asset.name, photos[-1].file_id)
-            if caption != combined:
-                await _reply(update, commands)
             return
         except TelegramError as exc:
             log.warning("Could not send the start picture (%s); falling back to text", exc)
 
-    if len(combined) <= MESSAGE_LIMIT:
-        await message.reply_text(
-            combined,
-            parse_mode=HTML,
-            disable_web_page_preview=True,
-            reply_markup=markup,
-        )
-        return
     await message.reply_text(
-        welcome,
+        text[:MESSAGE_LIMIT],
         parse_mode=HTML,
         disable_web_page_preview=True,
         reply_markup=markup,
     )
-    await _reply(update, commands)
 
 
 async def diag_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -105,7 +100,10 @@ async def diag_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _reply(update, texts.help_text() + "\n" + texts.commands_list())
+    rt = runtime(context)
+    user = update.effective_user
+    owner = rt.access.is_owner(user.id if user else None)
+    await _reply(update, texts.help_text() + "\n" + texts.commands_list(include_owner=owner))
 
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

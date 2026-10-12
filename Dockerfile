@@ -17,9 +17,11 @@ ENV PYTHONUNBUFFERED=1 \
     DOWNLOAD_DIR=/tmp/ytbot-downloads \
     NODE_PATH=/usr/local/lib/node_modules
 
-# ffmpeg/ffprobe mux and inspect media; curl is used by the health check.
+# ffmpeg/ffprobe mux and inspect media; curl is used by the health check; aria2c fetches
+# torrents, magnets and direct links (with parallel connections for the latter).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
+      aria2 \
       ca-certificates \
       curl \
       ffmpeg \

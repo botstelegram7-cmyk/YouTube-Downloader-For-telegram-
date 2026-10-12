@@ -13,6 +13,7 @@ from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.qualities import QualityOption
+from bot.utils import human_size
 
 MAX_CALLBACK_BYTES = 64
 
@@ -83,16 +84,21 @@ def cancel_keyboard(job_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[_button("❌ Cancel download", f"cancel:{job_id}", STYLE_DANGER)]])
 
 
-def welcome_keyboard(bot_username: str = "", owner_username: str = "") -> InlineKeyboardMarkup:
-    """The /start screen's shortcuts, plus the two things a public bot always needs."""
+def welcome_keyboard(
+    bot_username: str = "",
+    owner_username: str = "",
+    *,
+    show_owner: bool = False,
+) -> InlineKeyboardMarkup:
+    """The /start screen's shortcuts.
+
+    Kept short on purpose: how to use the bot, what is running now, and the one link that
+    grows the bot. The operator's handle appears only when explicitly switched on.
+    """
     rows = [
         [
             _button("📖 How to use", "nav:help", STYLE_PRIMARY),
             _button("📊 Status", "nav:status", STYLE_PRIMARY),
-        ],
-        [
-            _button("📦 Size limits", "nav:limits", STYLE_PRIMARY),
-            _button("ℹ️ About", "nav:about", STYLE_PRIMARY),
         ],
     ]
     links = []
@@ -104,13 +110,58 @@ def welcome_keyboard(bot_username: str = "", owner_username: str = "") -> Inline
                 style=STYLE_SUCCESS,
             )
         )
-    if owner_username:
-        links.append(
-            InlineKeyboardButton("👤 Owner", url=f"https://t.me/{owner_username}", style=STYLE_PRIMARY)
-        )
+    if show_owner and owner_username:
+        links.append(InlineKeyboardButton("👤 Owner", url=f"https://t.me/{owner_username}", style=STYLE_PRIMARY))
     if links:
         rows.append(links)
+    rows.append([_button("ℹ️ About", "nav:about", STYLE_PRIMARY)])
     return InlineKeyboardMarkup(rows)
+
+
+def torrent_keyboard(files: list[tuple[int, str, int]], token: str, limit: int = 8) -> InlineKeyboardMarkup:
+    """One button per file in a torrent — the file name and its real size, nothing invented."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, path, size in files[:limit]:
+        name = path.rsplit("/", 1)[-1]
+        label = f"🎬 {name}" if _is_video(name) else (f"🎵 {name}" if _is_audio(name) else f"📦 {name}")
+        rows.append(
+            [
+                _button(
+                    f"{label[:42]} · {human_size(size)}",
+                    f"tf:{index}:{token}",
+                    STYLE_SUCCESS if _is_video(name) else STYLE_PRIMARY,
+                )
+            ]
+        )
+    rows.append([_button("❌ Cancel", f"abort:{token}", STYLE_DANGER)])
+    return InlineKeyboardMarkup(rows)
+
+
+def direct_keyboard(token: str) -> InlineKeyboardMarkup:
+    """Download / cancel for a plain file URL."""
+    return InlineKeyboardMarkup(
+        [
+            [_button("⬇️ Download", f"dd:{token}", STYLE_SUCCESS)],
+            [_button("❌ Cancel", f"abort:{token}", STYLE_DANGER)],
+        ]
+    )
+
+
+def _is_video(name: str) -> bool:
+    from bot.torrent import VIDEO_EXTENSIONS
+
+    return name.lower().endswith(VIDEO_EXTENSIONS)
+
+
+def _is_audio(name: str) -> bool:
+    from bot.torrent import AUDIO_EXTENSIONS
+
+    return name.lower().endswith(AUDIO_EXTENSIONS)
+
+
+def retry_source_keyboard(token: str) -> InlineKeyboardMarkup:
+    """Shown when a torrent or direct download fails: read the link again and offer it."""
+    return InlineKeyboardMarkup([[_button("🔁 Try again", f"retry:{token}", STYLE_PRIMARY)]])
 
 
 def diagnostics_keyboard() -> InlineKeyboardMarkup:

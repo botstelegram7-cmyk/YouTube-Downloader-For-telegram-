@@ -9,7 +9,9 @@ from telegram.ext import ContextTypes
 
 from bot.access import Access
 from bot.assets import AssetLibrary
+from bot.cache import FetchCache
 from bot.jobs import JobManager
+from bot.process import ProcessRegistry
 from bot.typetube import TrackCache
 from bot.utils import utc_now
 from config import Settings
@@ -24,6 +26,9 @@ class Runtime:
     settings: Settings
     manager: JobManager
     tracks: TrackCache = field(default_factory=TrackCache)
+    pending: FetchCache = field(default_factory=FetchCache)
+    #: Processes that belong to no job (torrent metadata fetches): killed on shutdown.
+    registry: ProcessRegistry = field(default_factory=ProcessRegistry)
     uploader: object | None = None
     assets: AssetLibrary | None = None
     access: Access = None  # type: ignore[assignment]

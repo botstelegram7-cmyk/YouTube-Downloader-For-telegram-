@@ -244,10 +244,21 @@ async def test_an_animation_switch_happens_once_per_phase():
 
 
 # -- texts -------------------------------------------------------------------- #
-def test_the_welcome_credits_the_owner():
-    text = welcome("YouTube Downloader", "3.3.2", owner="@TechnicslSerena")
-    assert "@TechnicslSerena" in text
-    assert "Free for everyone" in text
+def test_the_welcome_says_nothing_about_engines_limits_commands_or_owners():
+    """The operator asked for a short /start: what to send, what comes back, nothing else."""
+    text = welcome("YouTube Downloader", "3.3.2", owner="@TechnicslSerena", show_owner=True)
+    assert "@TechnicslSerena" in text, "the credit shows when it is switched on"
+
+    plain = welcome("YouTube Downloader", "3.3.2", owner="@TechnicslSerena")
+    assert "@TechnicslSerena" not in plain, "off by default: no owner id for strangers"
+    for banned in ("TypeTube", "FFmpeg", "MB per file", "/diag", "OWNER", "Commands"):
+        assert banned not in plain, f"/start must not mention {banned!r}"
+    assert len(plain) < 500
+
+
+def test_the_start_screen_advertises_every_source_it_accepts():
+    text = welcome("YouTube Downloader", "3.3.2")
+    assert "YouTube" in text and "Torrent" in text and "Direct" in text
 
 
 def test_the_diagnostics_panel_shows_the_host_and_the_queue():
@@ -331,20 +342,22 @@ async def _run_start(tmp_path, **env):
     return message, rt, CAPTION_LIMIT, MESSAGE_LIMIT
 
 
-async def test_the_start_picture_caption_stays_inside_telegrams_limit(tmp_path):
-    """Telegram rejects a photo caption over 1024 characters, so the list follows it."""
+async def test_the_start_picture_carries_the_whole_welcome(tmp_path):
+    """One picture, one short caption, and no follow-up message full of commands."""
     message, _rt, limit, _message_limit = await _run_start(tmp_path, OWNER_USER_ID="5550001")
 
     assert len(message.photos) == 1, "the welcome screen is a picture"
     caption = message.photos[0]["caption"]
     assert len(caption) <= limit
-    assert "Owner" in caption and "5550001" in caption, "the operator is credited by id"
-    assert "/diag" not in caption
-    assert len(message.texts) == 1 and "/diag" in message.texts[0], "the shortcuts still arrive"
+    assert "/diag" not in caption, "the operator's tools are not advertised to users"
+    assert "Commands" not in caption
+    assert message.texts == [], "nothing follows the picture"
 
 
-async def test_a_username_is_credited_instead_of_an_id(tmp_path):
-    message, _rt, _limit, _message_limit = await _run_start(tmp_path, OWNER_USERNAME="@TechnicslSerena")
+async def test_a_username_is_credited_only_when_switched_on(tmp_path):
+    message, _rt, _limit, _message_limit = await _run_start(
+        tmp_path, OWNER_USERNAME="@TechnicslSerena", SHOW_OWNER_IN_START="true"
+    )
     assert "Owner</b>: @TechnicslSerena" in message.photos[0]["caption"]
 
 
@@ -367,7 +380,7 @@ async def test_a_client_that_refuses_the_picture_still_gets_the_text(tmp_path):
     await start_command(update, FakeContext(rt))
 
     assert message.photos == []
-    assert len(message.texts) == 1 and "/diag" in message.texts[0]
+    assert len(message.texts) == 1
     assert len(message.texts[0]) <= 4096
 
 

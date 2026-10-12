@@ -3,8 +3,12 @@
 A production-grade Telegram bot that turns a YouTube link into a **playable video** — or an
 audio track — delivered straight into the chat.
 
+* **Three kinds of link:** YouTube (real quality picker), **torrents and magnets** (pick the
+  exact file inside), and **direct file URLs**. Anything else is refused with a reason.
 * **Engine:** the [TypeTube](https://github.com/botstelegram7-cmyk/typetube) CLI resolves the
   real streams and downloads them with parallel range workers. No yt-dlp.
+* **Fetcher:** aria2 for magnets, `.torrent` files and direct links — DHT, web seeds,
+  `--select-file`, 16 parallel connections per HTTP file. Nothing is ever seeded afterwards.
 * **Delivery:** FFmpeg muxes and verifies the result, so the file always plays: real
   dimensions, a duration, a generated thumbnail, `supports_streaming` and a clean caption.
 * **Large files:** up to **2000 MB** per file over MTProto, Telegram's own protocol —
@@ -41,14 +45,24 @@ audio track — delivered straight into the chat.
 
 Send a link, get a file:
 
-1. **Resolve** — TypeTube reports the actual streams (`144p … 2160p`, H.264/VP9/AV1, audio
-   bitrates) plus title, channel, duration and artwork.
+0. **Classify** — a YouTube link, a `magnet:`/`.torrent`, or a plain file URL. Loopback,
+   private and link-local addresses are refused (unless `ALLOW_PRIVATE_LINKS=true`), because
+   a bot that fetches any URL a stranger sends is a request-forgery tool.
+1. **Resolve** — for YouTube, TypeTube reports the actual streams (`144p … 2160p`,
+   H.264/VP9/AV1, audio bitrates) plus title, channel, duration and artwork. For a torrent,
+   only the *metadata* is fetched first and the file list is offered — a season pack is
+   30 GB, the episode you want is 400 MB.
 2. **Choose** — the bot offers only what the video really has, recommending one quality in
    green. Nothing is estimated that cannot be known.
 3. **Download** — parallel range workers, live progress, one tap to cancel at any moment.
 4. **Deliver** — verified with ffprobe, remuxed with faststart so Telegram streams it while
    it downloads, given a JPEG thumbnail and a caption with title, quality, duration, size and
-   a link back to the source.
+   a link back to the source. A file that is not media at all is delivered as a document,
+   exactly as the server sent it — and a file whose name lies (a `.bin` full of random bytes
+   that ffprobe "reads" as video) is judged by what ffprobe really found, not by its name.
+5. **Watch it run** — the status card shows a bar, the bytes done, the **speed** and an
+   **ETA** whenever the total size is known, and it is edited no more than once every
+   `PROGRESS_MIN_INTERVAL` seconds (5 by default) to stay clear of Telegram's rate limits.
 
 A new link from the same user replaces the running job: the previous download is killed, its
 files are deleted, and the user is told. `/cancel` does the same on demand.
@@ -137,14 +151,14 @@ for a second account. This bot does not do that.
 
 | Command | What it does |
 |---|---|
-| `/start` | welcome screen with shortcuts |
+| `/start` | a picture, what the bot accepts (YouTube · torrent · direct), and shortcuts |
 | `/help` | the three-step how-to |
 | `/status` | running jobs, engine, transport, free disk |
 | `/cancel` | stop the download, the muxing and the upload |
 | `/limits` | the real ceiling, and how to raise it |
 | `/id` | your chat id, for `OWNER_USER_ID` |
 | `/about` | version and engine |
-| `/diag` | **owner only** — host CPU budget, free disk, transports, cached tracks, assets |
+| `/diag` | **owner only** — host CPU budget, free disk, transports, fetcher, cached tracks, assets |
 
 ## Configuration
 
@@ -165,6 +179,11 @@ Everything has a default; `.env.example` documents all of it. The ones people ac
 | `MAX_DURATION_MINUTES` | `0` | `0` = unlimited; refuses longer videos before downloading |
 | `DEFAULT_QUALITY` | `720p` | the quality highlighted in green; `best` for the maximum |
 | `TYPETUBE_API_KEY` | *(empty)* | lifts the cluster's quota and unlocks Hi-Fi audio |
+| `ARIA2_BINARY` | `aria2c` | the fetcher for torrents, magnets and direct links |
+| `TORRENT_METADATA_TIMEOUT` | `180` | seconds to wait for a magnet's file list |
+| `ALLOW_PRIVATE_LINKS` | `false` | `true` lets the bot fetch loopback/private URLs — testing only |
+| `PROGRESS_MIN_INTERVAL` | `5.0` | minimum seconds between status-message edits |
+| `SHOW_OWNER_IN_START` | `false` | show the operator's handle on `/start` |
 | `TYPETUBE_WORKERS` / `TYPETUBE_CHUNK_MB` | `0` / `10` | parallel range downloads; `0` = automatic (16 workers per CPU core, clamped to 8–32) |
 | `MAX_CONCURRENT_JOBS` | `2` | 1–2 on a 512 MB instance |
 | `DOWNLOAD_DIR` | `/tmp/ytbot-downloads` | temporary workspace, emptied per job |

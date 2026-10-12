@@ -133,6 +133,7 @@ def create_web_app(application: Application, settings: Settings) -> web.Applicat
                 "jobs": runtime.manager.snapshot(),
                 "counters": runtime.manager.stats(settings),
                 "cached_tracks": len(runtime.tracks),
+                "pending_choices": len(runtime.pending),
                 # The two numbers that answer "is the bot actually listening?": the
                 # application processing updates, and how many are waiting in its queue.
                 "application_running": bool(getattr(application, "running", False)),

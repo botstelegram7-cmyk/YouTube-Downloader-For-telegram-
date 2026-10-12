@@ -7,6 +7,7 @@ bolded, and never a promise the code does not keep (sizes and limits especially)
 from __future__ import annotations
 
 from bot.utils import html_escape as esc
+from bot.utils import human_size
 from config import BOT_API_UPLOAD_MB
 
 COMMANDS: tuple[tuple[str, str], ...] = (
@@ -17,8 +18,10 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("limits", "Why files are capped and how to raise the cap"),
     ("id", "Show your chat id (for OWNER_USER_ID)"),
     ("about", "Version, engine and credits"),
-    ("diag", "Operator diagnostics (owner only)"),
 )
+
+#: Only the operator ever sees this one in the menu.
+OWNER_COMMANDS: tuple[tuple[str, str], ...] = (("diag", "Operator diagnostics (owner only)"),)
 
 
 def banner(name: str, version: str, settings_summary: dict) -> str:
@@ -57,27 +60,24 @@ def _transport_label(summary: dict) -> str:
     )
 
 
-def welcome(name: str, version: str, *, owner: str = "") -> str:
-    """``/start`` — the introduction users see first."""
-    credit = f"\n<b>Owner</b>: {esc(owner)}" if owner else ""
+def welcome(name: str, version: str, *, owner: str = "", show_owner: bool = False) -> str:
+    """``/start`` — the introduction users see first.
+
+    Deliberately short: what to send, what comes back, and nothing about engines, ceilings
+    or commands. The command list lives in ``/help``; the operator's credit line is only
+    shown when ``SHOW_OWNER_IN_START`` is switched on.
+    """
+    credit = f"\n<b>Owner</b>: {esc(owner)}" if (show_owner and owner) else ""
     return (
         f"👋 <b>Welcome to {esc(name)}</b>\n"
-        f"<i>v{esc(version)} · TypeTube engine · FFmpeg delivery</i>\n"
+        f"<i>v{esc(version)}</i>\n"
         "\n"
-        "Send a YouTube link and I will show you the qualities that video really has, "
-        "download the one you pick and send it back as a <b>playable video</b>.\n"
+        "Send me a link and I will fetch it and send it back:\n"
+        "• <b>YouTube</b> — video or audio, in the quality you pick\n"
+        "• <b>Torrent or magnet</b> — pick the exact file you want\n"
+        "• <b>Direct link</b> — any file URL\n"
         "\n"
-        "<b>What you get</b>\n"
-        "• 🎬 MP4 with sound, thumbnail and a clean caption\n"
-        "• 🎵 Audio only, as M4A\n"
-        "• ⚡️ Parallel range workers, so downloads run at full speed\n"
-        "• 📈 Live progress with speed and ETA while it runs\n"
-        "• 👥 Free for everyone — no account, no limits of mine\n"
-        "\n"
-        "<b>Good to know</b>\n"
-        "• One download at a time — a new link replaces the running one\n"
-        "• <code>/cancel</code> stops everything instantly\n"
-        "• Buttons are colour-coded: green is recommended, red cancels"
+        "Downloads run with live speed and ETA, and one tap stops them."
         f"{credit}\n"
     )
 
@@ -88,11 +88,22 @@ def help_text() -> str:
         "\n"
         "<b>1 · Send a link</b>\n"
         "Paste any YouTube link — <code>youtube.com/watch</code>, <code>youtu.be</code>, "
-        "<code>/shorts</code>, <code>/live</code> or just the 11-character video id.\n"
+        "<code>/shorts</code>, <code>/live</code> or just the 11-character video id — or a "
+        "<code>magnet:</code> link, a <code>.torrent</code> URL, or a direct file link.\n"
         "\n"
         "<b>2 · Pick a quality</b>\n"
         "I list the qualities that video actually has, from 144p up to its maximum, and mark "
         "the best one in green. Audio-only is one tap away when you want just the sound.\n"
+        "\n"
+        "<b>Torrents</b>\n"
+        "Send a <code>magnet:</code> link or a <code>.torrent</code> URL. I read the file "
+        "list, you tap the file you want, and only that file is downloaded. Nothing is "
+        "seeded afterwards.\n"
+        "\n"
+        "<b>Direct links</b>\n"
+        "Any <code>http(s)</code> URL to a file. If it is video or audio it arrives as "
+        "playable media; anything else arrives as a document, exactly as the server sent "
+        "it.\n"
         "\n"
         "<b>3 · Wait for the file</b>\n"
         "A status message shows download, mux and upload progress, with a red "
@@ -113,16 +124,20 @@ def about_text(version: str, engine: str = "TypeTube") -> str:
         "\n"
         f"<b>Version</b>: {esc(version)}\n"
         f"<b>Engine</b>: {esc(engine)}\n"
+        "<b>Fetcher</b>: aria2 — torrents, magnets and direct links\n"
         "<b>Delivery</b>: FFmpeg mux, faststart, thumbnail, streaming video\n"
-        "<b>Built with</b>: python-telegram-bot, TypeTube, FFmpeg\n"
+        "<b>Built with</b>: python-telegram-bot, TypeTube, FFmpeg, aria2\n"
         "\n"
-        "<i>Only download what you own or are allowed to save.</i>"
+        "<i>Only download what you own or are allowed to save. Torrents are fetched on "
+        "demand and never seeded afterwards.</i>"
     )
 
 
-def commands_list() -> str:
-    width = max(len(cmd) for cmd, _ in COMMANDS)
-    rows = "\n".join(f"/{cmd.ljust(width)}  {esc(text)}" for cmd, text in COMMANDS)
+def commands_list(*, include_owner: bool = False) -> str:
+    """The command cheat sheet. ``/diag`` is listed only for the operator."""
+    entries = COMMANDS + (OWNER_COMMANDS if include_owner else ())
+    width = max(len(cmd) for cmd, _ in entries)
+    rows = "\n".join(f"/{cmd.ljust(width)}  {esc(text)}" for cmd, text in entries)
     return f"<b>Commands</b>\n<pre>{rows}</pre>"
 
 
@@ -181,6 +196,56 @@ def analyzing(url: str) -> str:
     return "🔍 <b>Reading the link…</b>\n<i>Resolving streams with TypeTube.</i>"
 
 
+def analyzing_torrent(label: str) -> str:
+    return (
+        "🧲 <b>Reading the torrent…</b>\n"
+        f"<i>{esc(label[:80])}</i>\n\n"
+        "Fetching the file list from the swarm. This can take a moment on a magnet link "
+        "with few peers."
+    )
+
+
+def analyzing_link(host: str) -> str:
+    return f"🔍 <b>Checking the link…</b>\n<i>{esc(host[:80])}</i>"
+
+
+def torrent_files(name: str, files: list[tuple[int, str, int]], total: int, *, hint: str = "") -> str:
+    """The picker for a torrent: what is inside, and how big each part is."""
+    lines = [
+        f"🧲 <b>{esc(name[:120])}</b>",
+        f"📦 {esc(human_size(total))} in {len(files)} file(s)",
+        "",
+        "<b>Choose what to download</b>",
+    ]
+    for _, path, size in files[:8]:
+        lines.append(f"• {esc(path[:70])} — <b>{esc(human_size(size))}</b>")
+    if len(files) > 8:
+        lines.append(f"<i>…and {len(files) - 8} more, smallest first</i>")
+    lines.append("")
+    lines.append(esc(hint) if hint else "Only the file you pick is downloaded.")
+    return "\n".join(lines)
+
+
+def direct_link(host: str, name: str, size: int, content_type: str = "", *, note: str = "") -> str:
+    """The confirmation for a plain file URL."""
+    lines = [
+        "📥 <b>Direct download</b>",
+        f"<i>{esc((name or host)[:120])}</i>",
+        "",
+        f"🌐 {esc(host[:60])}",
+    ]
+    if size:
+        lines.append(f"📦 {esc(human_size(size))}")
+    if content_type:
+        lines.append(f"🏷 {esc(content_type.split(';')[0][:40])}")
+    else:
+        lines.append("📦 size not announced by the server")
+    if note:
+        lines.append(f"\n<i>{esc(note[:160])}</i>")
+    lines += ["", "Press <b>Download</b> to fetch it and send it here."]
+    return "\n".join(lines)
+
+
 def choose_quality(title: str, duration: str, uploader: str, limit_mb: int, *, replaces_running: bool = False) -> str:
     header = "♻️ <i>Your running download is replaced when you pick.</i>\n\n" if replaces_running else ""
     lines = [
@@ -231,7 +296,7 @@ def done_caption(
     url: str,
     kind: str = "video",
 ) -> str:
-    icon = "🎵" if kind == "audio" else "🎬"
+    icon = {"audio": "🎵", "document": "📦"}.get(kind, "🎬")
     lines = [
         f"{icon} <b>{esc(title[:150])}</b>",
         f"🎚 {esc(quality)}"
@@ -297,10 +362,20 @@ def not_youtube(host: str) -> str:
 
 def not_supported(text: str) -> str:
     return (
-        "🔗 <b>Send me a YouTube link</b>\n"
-        "Paste a video URL (<code>youtube.com/watch?v=…</code>, <code>youtu.be/…</code>, a Short or a live link) "
-        "or an 11-character video id.\n"
+        "🔗 <b>Send me a link</b>\n"
+        "• <b>YouTube</b> — <code>youtube.com/watch?v=…</code>, <code>youtu.be/…</code>, "
+        "a Short, a live link or an 11-character id\n"
+        "• <b>Torrent</b> — a <code>magnet:</code> link or a <code>.torrent</code> URL\n"
+        "• <b>Direct</b> — any direct file URL (mp4, mp3, mkv, zip and so on)\n"
         f"\n<i>{esc(text[:120])}</i>"
+    )
+
+
+def link_refused(reason: str) -> str:
+    return (
+        "🚫 <b>I cannot fetch that link</b>\n"
+        f"<i>{esc(reason[:200])}</i>\n\n"
+        "Send a YouTube link, a magnet/`.torrent` link, or a direct file URL."
     )
 
 
@@ -415,6 +490,7 @@ def diagnostics(summary: dict, stats: dict, runtime: dict) -> str:
         f"• engine key: {esc(str(summary.get('typetube_key')))}",
         f"• download workers: <code>{esc(str(summary.get('typetube_workers')))}</code>",
         f"• FFmpeg: <code>{esc(str(summary.get('ffmpeg')))}</code>",
+        f"• fetcher: <code>{esc(str(summary.get('aria2')))}</code> — torrents, magnets, direct links",
         "",
         "<b>Host</b>",
         f"• CPU budget: {esc(str(runtime.get('cpu')))}",

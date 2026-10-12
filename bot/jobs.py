@@ -27,7 +27,8 @@ from telegram import Bot
 from telegram.error import TelegramError
 
 from bot import texts
-from bot.download import DownloadResult, ProgressUpdate, download_media
+from bot.cache import SourceCache
+from bot.download import DownloadResult, ProgressUpdate, download_from_source, download_media
 from bot.errors import (
     BotError,
     DiskSpaceError,
@@ -39,10 +40,11 @@ from bot.errors import (
     UploadCancelled,
     UploadError,
 )
-from bot.keyboards import cancel_keyboard, retry_keyboard
+from bot.keyboards import cancel_keyboard, retry_keyboard, retry_source_keyboard
 from bot.process import ProcessRegistry
 from bot.progress import ProgressCard
 from bot.qualities import QualityOption, build_options, smaller_video_options
+from bot.sources import Source
 from bot.texts import cancelled as cancelled_text
 from bot.typetube import Track
 from bot.upload import send_media
@@ -70,14 +72,38 @@ PHASE_ICONS = {
 
 
 @dataclass
+class Request:
+    """What the user asked for: a YouTube quality, a file inside a torrent, or a direct URL."""
+
+    chat_id: int
+    user_id: int
+    url: str
+    title: str
+    option: QualityOption | None = None
+    track: Track | None = None
+    token: str = ""
+    source: Source | None = None
+    torrent_path: Path | None = None
+    torrent_index: int = 0
+
+    @classmethod
+    def youtube(cls, **kwargs) -> Request:
+        return cls(**kwargs)
+
+
+@dataclass
 class Job:
     """One download request, from the button press to the delivered file."""
 
     user_id: int
     chat_id: int
     url: str
-    option: QualityOption
     title: str
+    option: QualityOption | None = None
+    source: Source | None = None
+    source_token: str = ""
+    torrent_path: Path | None = None
+    torrent_index: int = 0
     token: str = ""
     reply_to_message_id: int | None = None
     track: Track | None = None
@@ -95,7 +121,11 @@ class Job:
 
     @property
     def quality_label(self) -> str:
-        return self.option.label
+        if self.option is not None:
+            return self.option.label
+        if self.source is not None:
+            return "🧲 Torrent" if self.source.is_torrent else "📥 Direct"
+        return "Download"
 
     @property
     def age_seconds(self) -> float:
@@ -117,6 +147,12 @@ class JobManager:
         self.bot = bot
         self.uploader = uploader
         self.assets = assets
+        #: Links kept so a failed torrent/direct job can offer "try again".
+        self.sources = SourceCache()
+        #: How often a status message may be edited. Telegram allows roughly one message per
+        #: second per chat; the configured floor (5 s by default) keeps a busy bot well clear
+        #: of that and was an explicit requirement.
+        self.progress_interval = max(settings.progress_interval, settings.progress_min_interval)
         self._jobs: dict[int, Job] = {}
         self._lock = asyncio.Lock()
         self._slots = asyncio.Semaphore(max(1, settings.max_concurrent_jobs))
@@ -160,18 +196,13 @@ class JobManager:
     # -- starting -----------------------------------------------------------
     async def start_job(
         self,
+        request: Request,
         *,
-        chat_id: int,
-        user_id: int,
-        url: str,
-        option: QualityOption,
-        title: str,
-        token: str = "",
-        track: Track | None = None,
         reply_to_message_id: int | None = None,
         status_message=None,
     ) -> Job:
         """Cancel the user's previous job (if any) and start this one."""
+        user_id = request.user_id
         async with self._lock:
             previous = self._jobs.get(user_id)
             if previous is not None and previous.is_active():
@@ -180,20 +211,26 @@ class JobManager:
 
             job = Job(
                 user_id=user_id,
-                chat_id=chat_id,
-                url=url,
-                option=option,
-                title=title,
-                token=token,
-                track=track,
+                chat_id=request.chat_id,
+                url=request.url,
+                option=request.option,
+                title=request.title,
+                token=request.token,
+                track=request.track,
+                source=request.source,
+                source_token=(
+                    self.sources.put(request.source, user_id=user_id) if request.source is not None else ""
+                ),
+                torrent_path=request.torrent_path,
+                torrent_index=request.torrent_index,
                 reply_to_message_id=reply_to_message_id,
             )
             if status_message is not None:
                 job.status = ProgressCard(
                     self.bot,
-                    chat_id,
+                    request.chat_id,
                     status_message,
-                    interval=self.settings.progress_interval,
+                    interval=self.progress_interval,
                     loop=asyncio.get_running_loop(),
                 )
             self._jobs[user_id] = job
@@ -260,15 +297,20 @@ class JobManager:
             await self._finish_error(job, cancelled_text())
         except TooLargeError as exc:
             self.failed += 1
+            log.warning("Job %s failed: file too large for this transport (%s)", job.id, human_size(exc.size_bytes))
             await self._finish_too_large(job, exc)
         except DiskSpaceError as exc:
             self.failed += 1
+            log.warning("Job %s failed: %s", job.id, exc.reason)
             await self._finish_error(job, texts.job_failed(exc.reason))
         except (DownloadError, ProbeError, UploadError, MissingDependency) as exc:
             self.failed += 1
+            # Every expected failure is named in the log: a silent failure is undebuggable.
+            log.warning("Job %s failed (%s): %s", job.id, type(exc).__name__, exc.reason)
             await self._finish_error(job, texts.job_failed(exc.reason))
         except BotError as exc:
             self.failed += 1
+            log.warning("Job %s failed (%s): %s", job.id, type(exc).__name__, exc.reason)
             await self._finish_error(job, texts.job_failed(exc.reason))
         except Exception:
             self.failed += 1
@@ -312,7 +354,7 @@ class JobManager:
                         self.bot,
                         job.chat_id,
                         message,
-                        interval=self.settings.progress_interval,
+                        interval=self.progress_interval,
                         loop=loop,
                         keyboard=markup,
                         animated=True,
@@ -335,7 +377,7 @@ class JobManager:
             self.bot,
             job.chat_id,
             message,
-            interval=self.settings.progress_interval,
+            interval=self.progress_interval,
             loop=loop,
             keyboard=markup,
         )
@@ -344,7 +386,12 @@ class JobManager:
         settings = self.settings
 
         if job.status is None:
-            job.status = await self._open_card(job)
+            try:
+                job.status = await self._open_card(job)
+            except Exception as exc:
+                # No status card is survivable; a dead job with no explanation is not.
+                log.warning("Could not open a status card for job %s: %s", job.id, exc)
+                job.status = None
 
         job.temp_dir = make_temp_dir(settings.download_dir, prefix=f"job-{job.id}-")
 
@@ -356,7 +403,7 @@ class JobManager:
                     texts.card_caption(job.title, job.quality_label, "download"),
                     key="download",
                 )
-            result = await self._download_phase(job)
+            result = await self._fetch(job)
 
             job.phase = "upload"
             if self.assets is not None and job.status is not None:
@@ -390,6 +437,36 @@ class JobManager:
         # The file speaks for itself; the status message has done its job.
         await job.status.delete()
 
+    async def _fetch(self, job: Job) -> DownloadResult:
+        """Download from whichever source this job came from."""
+        if job.source is not None and not job.source.is_youtube:
+            return await self._source_phase(job)
+        return await self._download_phase(job)
+
+    async def _source_phase(self, job: Job) -> DownloadResult:
+        """Torrent and direct-link jobs: fetch, then verify like any other download."""
+        progress = self._progress_callback(job)
+
+        async def run() -> DownloadResult:
+            return await download_from_source(
+                source=job.source,  # type: ignore[arg-type]
+                dest_dir=job.temp_dir,  # type: ignore[arg-type]
+                settings=self.settings,
+                on_progress=progress,
+                cancel_event=job.cancel_event,
+                registry=job.registry,
+                torrent_path=job.torrent_path,
+                torrent_index=job.torrent_index,
+            )
+
+        try:
+            return await asyncio.wait_for(run(), timeout=self.settings.download_timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise DownloadError(
+                f"That download took longer than {human_duration(self.settings.download_timeout_seconds)} "
+                "and was stopped."
+            ) from exc
+
     async def _download_phase(self, job: Job) -> DownloadResult:
         progress = self._progress_callback(job)
 
@@ -415,21 +492,47 @@ class JobManager:
 
     def _progress_callback(self, job: Job):
         """Render progress updates; called from the CLI's output stream."""
-        state = {"started": time.monotonic(), "phase": job.phase, "last": 0.0}
+        state = {"started": time.monotonic(), "phase": job.phase, "last": 0.0, "numbers": False}
+
+        # Telegram allows roughly one message per second per chat, so edits are spaced by
+        # the larger of the configured interval and the enforced floor (5 s by default).
+        interval = self.progress_interval
 
         def callback(update: ProgressUpdate) -> None:
             job.phase = update.phase
             if job.status is None:
                 return
-            # Throttle here too: hooks fire many times per second.
             now = time.monotonic()
-            if update.phase == state["phase"] and now - state["last"] < self.settings.progress_interval:
+            new_phase = update.phase != state["phase"]
+            # The first sample that carries real numbers is shown immediately — otherwise a
+            # five-second floor would hide the speed and the ETA until the job is finished.
+            first_numbers = not state.get("numbers") and bool(update.total or update.percent)
+            # Throttle here too: hooks fire many times per second, and Telegram allows about
+            # one message per second per chat.
+            if not new_phase and not first_numbers and now - state["last"] < interval:
                 return
+            if first_numbers:
+                state["numbers"] = True
             state["last"] = now
             state["phase"] = update.phase
-            job.status.update_from_thread(self._render(job, update))
+            job.status.update_from_thread(self._render(job, update), force=first_numbers)
 
         return callback
+
+    @staticmethod
+    def _live_line(update: ProgressUpdate) -> str:
+        """Speed and ETA, each only when it is known — no invented numbers.
+
+        The engine reports a speed for the range it is fetching; the ETA is only printed
+        when there is a total size to divide, because otherwise it would be a guess dressed
+        up as a promise.
+        """
+        parts = []
+        if update.speed:
+            parts.append(f"⚡ {human_rate(update.speed)}")
+        if update.eta is not None and update.total:
+            parts.append(f"⏳ ETA {human_eta(update.eta)}")
+        return "  ·  ".join(parts)
 
     def _render(self, job: Job, update: ProgressUpdate) -> str:
         if update.phase == "upload":
@@ -451,10 +554,10 @@ class JobManager:
         else:
             lines.append(f"{progress_bar(percent)}  <b>{percent:.1f}%</b>")
             total = f" / {human_size(update.total)}" if update.total else ""
-            lines.append(
-                f"📦 {human_size(update.downloaded)}{total}  ·  ⚡ {human_rate(update.speed)}"
-                f"  ·  ⏳ {human_eta(update.eta)}"
-            )
+            lines.append(f"📦 {human_size(update.downloaded)}{total}")
+            lines.append(self._live_line(update))
+        if update.note:
+            lines.append(f"<i>{update.note[:120]}</i>")
         return "\n".join(lines)
 
     # -- ending -------------------------------------------------------------
@@ -465,11 +568,14 @@ class JobManager:
             return
 
         reply_markup = None
-        if job.track is not None:
+        if job.track is not None and job.option is not None:
             options = build_options(job.track, self.settings, capability_bytes=self.settings.upload_capability_bytes)
             smaller = smaller_video_options(options, job.option)
             if smaller and job.token:
                 reply_markup = retry_keyboard(smaller, job.token)
+        if reply_markup is None and job.source is not None and job.source_token:
+            # Torrents and direct links have nothing to "lower": offer to read the link again.
+            reply_markup = retry_source_keyboard(job.source_token)
 
         await job.status.finish(text, reply_markup=reply_markup)
 

@@ -33,7 +33,7 @@ from bot.keyboards import delivered_keyboard
 from bot.mtproto import MtprotoUploader
 from bot.progress import StatusReporter, UploadProgressFile
 from bot.texts import done_caption
-from bot.utils import human_size, progress_bar, safe_filename
+from bot.utils import human_eta, human_rate, human_size, progress_bar, safe_filename
 from config import MB, Settings
 
 log = logging.getLogger("bot.upload")
@@ -115,8 +115,13 @@ def _upload_text(
         f"{progress_bar(percent)}  <b>{percent:.1f}%</b>",
     ]
     if total:
-        tail = f"  ·  ⚡ {human_size(speed)}/s" if speed else ""
-        lines.append(f"📦 {human_size(sent)} / {human_size(total)}{tail}")
+        parts = [f"📦 {human_size(sent)} / {human_size(total)}"]
+        if speed:
+            parts.append(f"⚡ {human_rate(speed)}")
+            remaining = max(0.0, (total - sent) / speed)
+            if remaining < 24 * 3600:
+                parts.append(f"⏳ ETA {human_eta(remaining)}")
+        lines.append("  ·  ".join(parts))
     return "\n".join(lines)
 
 
@@ -236,6 +241,16 @@ async def _send_via_bot_api(
     }
 
     try:
+        if result.kind == "document":
+            # Anything that is not media Telegram can play: send the bytes faithfully.
+            await _chat_action(bot, chat_id, ChatAction.UPLOAD_DOCUMENT)
+            message = await bot.send_document(
+                document=video_input,
+                thumbnail=thumbnail_file,
+                **common,
+            )
+            return UploadOutcome("sendDocument", message, result.thumbnail is not None, filename)
+
         if result.kind == "audio":
             await _chat_action(bot, chat_id, ChatAction.UPLOAD_DOCUMENT)
             message = await bot.send_audio(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from telegram import BotCommand, BotCommandScopeDefault
+from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -27,6 +27,7 @@ from bot.handlers import (
     cancel_callback,
     cancel_command,
     diag_command,
+    direct_callback,
     help_command,
     id_command,
     limits_command,
@@ -34,8 +35,10 @@ from bot.handlers import (
     on_error,
     on_link,
     quality_callback,
+    retry_callback,
     start_command,
     status_command,
+    torrent_file_callback,
 )
 from bot.jobs import JobManager
 from bot.mtproto import MtprotoUploader
@@ -101,6 +104,9 @@ def build_application(settings: Settings) -> Application:
     # Links and buttons ---------------------------------------------------------
     application.add_handler(MessageHandler(COMMAND_FILTER | filters.Caption(), on_link))
     application.add_handler(CallbackQueryHandler(quality_callback, pattern=r"^dl:"))
+    application.add_handler(CallbackQueryHandler(torrent_file_callback, pattern=r"^tf:"))
+    application.add_handler(CallbackQueryHandler(direct_callback, pattern=r"^dd:"))
+    application.add_handler(CallbackQueryHandler(retry_callback, pattern=r"^retry:"))
     application.add_handler(CallbackQueryHandler(cancel_callback, pattern=r"^cancel:"))
     application.add_handler(CallbackQueryHandler(abort_callback, pattern=r"^abort:"))
     application.add_handler(CallbackQueryHandler(nav_callback, pattern=r"^nav:"))
@@ -206,12 +212,30 @@ async def _connect_uploader(rt: Runtime, *, attempts: int, delay: float) -> None
 
 
 async def _publish_commands(application: Application) -> None:
-    """Register the command menu users see in the Telegram UI."""
+    """Register the command menu users see in the Telegram UI.
+
+    ``/diag`` is deliberately absent from the public list — it answers only the owner — and
+    is published in a private scope for the owner's own chat instead.
+    """
     commands = [BotCommand(command=name, description=text) for name, text in texts.COMMANDS]
     try:
         await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     except TelegramError as exc:
         log.warning("Could not publish the command menu: %s", exc)
+
+    rt: Runtime | None = application.bot_data.get(BOT_DATA_KEY)
+    owner_id = rt.access.owner_id if rt is not None and rt.access is not None else 0
+    if not owner_id:
+        return
+    owner_menu = commands + [
+        BotCommand(command=name, description=text) for name, text in texts.OWNER_COMMANDS
+    ]
+    try:
+        await application.bot.set_my_commands(
+            owner_menu, scope=BotCommandScopeChat(chat_id=owner_id)
+        )
+    except TelegramError as exc:
+        log.debug("Could not publish the owner's command menu: %s", exc)
 
 
 async def on_shutdown(application: Application) -> None:

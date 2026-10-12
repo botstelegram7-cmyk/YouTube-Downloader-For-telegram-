@@ -200,10 +200,15 @@ class ProgressCard:
             except TelegramError as exc:
                 log.debug("Could not edit the status card: %s", exc)
 
-    def update_from_thread(self, text: str) -> None:
-        """Thread-safe variant: safe to call from any thread or task."""
+    def update_from_thread(self, text: str, *, force: bool = False) -> None:
+        """Thread-safe variant: safe to call from any thread or task.
+
+        ``force`` bypasses the interval — used for the one update that carries the first
+        real numbers, so the speed and the ETA are on screen immediately instead of after
+        the first interval has passed.
+        """
         with contextlib.suppress(RuntimeError):  # loop already closed (shutdown)
-            self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.update(text)))
+            self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.update(text, force=force)))
 
     # -- animation ------------------------------------------------------------
     def show_animation(self, asset, caption: str, *, key: str) -> None:

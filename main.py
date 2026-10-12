@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from bot import texts, typetube
+from bot.fetch import aria2_version
 from bot.ffmpeg import ffmpeg_version
 from bot.logging_setup import setup_logging
 from bot.utils import disk_free_bytes, human_size
@@ -64,6 +65,9 @@ async def dependency_report(settings: Settings) -> dict[str, str]:
     report["typetube"] = version or ("installed" if typetube.cli_present(settings) else "MISSING")
     node = typetube.node_version(settings.node_binary)
     report["node"] = f"{node[0]}.{node[1]}" if node else "MISSING"
+
+    aria2 = await aria2_version(settings)
+    report["aria2"] = f"{aria2} (torrents, direct links)" if aria2 else "MISSING"
 
     try:
         import telegram
@@ -113,6 +117,12 @@ async def run_check(settings: Settings, *, online: bool) -> int:
     if "MISSING" in deps.get("ffmpeg", ""):
         problems.append("FFmpeg is required to mux video and audio.")
     problems.extend(typetube.ensure_available(settings))
+    if "MISSING" in deps.get("aria2", ""):
+        # Not fatal: YouTube downloads do not need it. Torrents and direct links do.
+        warnings.append(
+            "aria2c was not found, so torrent, magnet and direct-link downloads are "
+            "unavailable. Install aria2 (apt-get install aria2) or set ARIA2_BINARY."
+        )
 
     print(
         f"Upload             : up to {settings.upload_capability_mb} MB per file, via {settings.transport}"
