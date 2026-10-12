@@ -74,12 +74,16 @@ jobs:
       - name: Build the image
         run: docker build -t ytbot-test .
 
-      - name: Validate the image (config, FFmpeg, Node, TypeTube)
+      - name: Validate the image (config, FFmpeg, Node, TypeTube, aria2)
         run: |
           docker run --rm \
             -e BOT_TOKEN=123456789:placeholder-token-used-only-by-ci \
             -e WEBHOOK_URL=https://example.invalid \
             ytbot-test python main.py --check
+
+          # A missing fetcher only degrades torrent and direct links, so --check warns
+          # rather than fails. Assert it here so the Dockerfile cannot lose it silently.
+          docker run --rm --entrypoint aria2c ytbot-test --version
 
       - name: End-to-end check inside the image (FFmpeg, webhook, /health)
         run: |
