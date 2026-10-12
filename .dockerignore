@@ -11,9 +11,9 @@ env
 .ruff_cache
 .arena
 
-# Tests, docs and tooling are not part of the runtime image.
+# Tests and docs are not part of the runtime image; scripts/ is, because operators
+# generate their session string with `python scripts/make_session.py` inside it.
 tests
-scripts
 docs
 *.md
 !README.md
