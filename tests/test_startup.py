@@ -38,6 +38,13 @@ SETTINGS = load_settings(
 )
 
 
+#: A fresh CI runner can have a monotonically-clocked uptime shorter than the cache TTL, so
+#: "checked_at = 0.0" alone is not enough to force a re-probe: clear the cached value too.
+def _forget_ffmpeg_cache() -> None:
+    _FFMPEG_CACHE["version"] = None
+    _FFMPEG_CACHE["checked_at"] = 0.0
+
+
 class HangingUploader:
     """Credentials are fine, but the connection never completes."""
 
@@ -223,7 +230,7 @@ async def test_health_reports_the_transport_state_while_connecting(monkeypatch):
     application = FakeApplication(runtime, [])
 
     monkeypatch.setattr("bot.web.ffmpeg_version", _fake_ffmpeg_version)
-    _FFMPEG_CACHE["checked_at"] = 0.0
+    _forget_ffmpeg_cache()
 
     web_app = create_web_app(application, SETTINGS)  # type: ignore[arg-type]
     route = next(r for r in web_app.router.routes() if r.resource.canonical == "/health")
@@ -245,7 +252,7 @@ async def test_health_does_not_spawn_ffmpeg_on_every_poll(monkeypatch):
         return "7.0.2"
 
     monkeypatch.setattr("bot.web.ffmpeg_version", counting_ffmpeg)
-    _FFMPEG_CACHE["checked_at"] = 0.0
+    _forget_ffmpeg_cache()
 
     runtime = Runtime(settings=SETTINGS, manager=_NullManager(), uploader=HangingUploader())
     web_app = create_web_app(FakeApplication(runtime, []), SETTINGS)  # type: ignore[arg-type]
