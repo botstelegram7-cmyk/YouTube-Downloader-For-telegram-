@@ -7,6 +7,9 @@ license = { text = "MIT" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Make the repository root importable so `pytest` works whether it is invoked as
+# `pytest` or `python -m pytest`.
+pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]

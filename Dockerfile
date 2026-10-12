@@ -24,11 +24,10 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# yt-dlp is installed twice on purpose: as the Python package (used in-process)
-# and as a standalone binary, so operators always have a working CLI to debug with.
-RUN pip install --no-cache-dir --upgrade yt-dlp \
- && cp "$(command -v yt-dlp)" /usr/local/bin/yt-dlp \
- && yt-dlp --version
+# yt-dlp comes from requirements.txt, which installs both the Python package (used
+# in-process) and the `yt-dlp` console script, so operators can always debug from a
+# shell. Fail the build here if the CLI is missing, rather than at run time.
+RUN yt-dlp --version
 
 COPY config.py main.py ./
 COPY bot ./bot
