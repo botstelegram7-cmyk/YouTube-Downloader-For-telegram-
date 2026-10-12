@@ -4,6 +4,66 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 semantic versioning for its configuration surface and behaviour.
 
+## [3.3.2] — 2026-10-12
+
+**"Bot went offline after /start", the slow download path, and a bot anyone can use.**
+
+The two complaints behind this release were "download speed so slow, fix those" and "after
+/start the bot got offline". Both turned out to have a cause that could be measured, and
+both are now pinned by tests.
+
+### Fixed
+
+* **A refused webhook no longer looks like a registered one.** `setWebhook` failing was
+  logged as `webhook registered`, so the bot reported perfect health while Telegram delivered
+  *zero* updates — which is exactly what "offline after /start" looks like. Registration now
+  returns a verdict, the phase line says `webhook REFUSED by Telegram`, and the bot **falls
+  back to long polling** so it stays usable while the operator fixes the URL.
+* **A stale `WEBHOOK_URL` can no longer hide the real address.** The service was renamed on
+  Render and the old host was kept in `WEBHOOK_URL`: Telegram then delivered updates to a
+  host that no longer answers. When `RENDER_EXTERNAL_URL` is present and disagrees, the
+  platform's own address wins, a startup warning names both URLs, and `/diag` shows where the
+  URL came from and flags the ignored one.
+* **The webhook secret is cleaned instead of refused.** Telegram accepts only
+  `A-Z a-z 0-9 _ -` in `secret_token`; a base64 value (`Ab+C/D=E==`, what `generateValue`
+  produces) made every registration fail. It is now sanitised to `AbCDE` with a warning
+  naming the new value.
+* **The `/start` caption no longer exceeds Telegram's 1024-character limit.** The greeting
+  rides on the picture, the command list follows as its own message, and a text fallback
+  splits at 4096 instead of hitting the API limit.
+
+### Added
+
+* **`/start` answers with a real picture** (`assets/start.jpg`) carrying the introduction, the
+  add-to-group link and the owner credit, with the picture's `file_id` cached so it is
+  uploaded once.
+* **An animated progress card** (`assets/progress.gif`, `assets/upload.gif`): the status
+  message shows a looping indicator, switches animation between the download and upload
+  phases, and edits its caption with live speed and ETA. `RICH_MESSAGES=false` keeps plain
+  text; any client or cache that refuses the media edit falls back automatically.
+* **A CPU-aware worker count.** `TYPETUBE_WORKERS=0` (new default) reads the container's own
+  CPU quota — cgroup v2 `cpu.max`, cgroup v1 `cpu.cfs_quota_us`, else `os.cpu_count()` — and
+  asks for 16 workers per core, clamped to 8–32. `MT_CONNECTIONS` goes from 4 to 8.
+* **Owner-only diagnostics.** `/diag` (and its refresh button) answers the configured owner
+  and nobody else — `OWNER_USERNAME` resolves via `get_chat` at startup, so no numeric id is
+  needed. An unconfigured owner grants *nobody* access rather than everyone.
+* **A fair-use cooldown** of 5 s per user (`USER_COOLDOWN_SECONDS`, `0` disables), with the
+  owner exempt.
+* **`/health` for platforms, `/health` for operators:** the public probe returns
+  `{ok, service, version, uptime_seconds}` and always answers 200 — it can no longer fail
+  because an optional binary or a warming transport is missing. The operator view (the same
+  route plus the `X-Telegram-Bot-Api-Secret-Token` header) adds transport state, job counters,
+  CPU budget and disk.
+* `/stats` gained `application_running` and `queued_updates` — the two numbers that answer
+  "is the bot actually listening?".
+
+### Changed
+
+* The bot is **public by default**: no owner is needed to download, and the startup warning
+  says so instead of implying a lock.
+* `bot/runner.py` reports its startup phases truthfully, and Pyrogram's INFO chatter is
+  silenced with the other noisy libraries.
+
 ## [3.3.1] — 2026-10-12
 
 **A deploy that failed its health check, fixed — and the Pyrogram upload path made explicit.**

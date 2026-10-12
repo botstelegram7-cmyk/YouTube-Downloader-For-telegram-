@@ -9,8 +9,11 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from bot import texts
+from bot.keyboards import diagnostics_keyboard
 from bot.qualities import build_options, find_option
 from bot.runtime import runtime
+from bot.utils import budget_note, disk_free_bytes, human_size
+from config import VERSION
 
 log = logging.getLogger("bot.handlers.callbacks")
 
@@ -92,8 +95,66 @@ async def abort_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _edit(query, texts.picker_dismissed())
 
 
-async def _edit(query, text: str) -> None:
+async def _edit(query, text: str, *, markup=None) -> None:
     try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=None)
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=markup,
+        )
     except Exception as exc:
         log.debug("Could not edit the callback message: %s", exc)
+
+async def nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The ``nav:`` buttons on the /start screen (and the /diag refresh)."""
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+    await query.answer()
+    rt = runtime(context)
+    action = query.data.split(":", 1)[1]
+    user = update.effective_user
+
+    if action == "diag":
+        if not rt.access.is_owner(user.id if user else None):
+            await _edit(query, texts.owner_only("/diag"))
+            return
+    elif action == "help":
+        await _edit(query, texts.help_text() + "\n" + texts.commands_list())
+        return
+    elif action == "status":
+        stats = rt.manager.stats(rt.settings)
+        text = texts.status_text(
+            rt.settings.summary(),
+            [],
+            human_size(disk_free_bytes(rt.settings.download_dir)),
+        )
+        text += (
+            "\n\n<b>This session</b>\n"
+            f"• delivered: {stats['completed']}\n"
+            f"• failed: {stats['failed']}\n"
+            f"• cancelled: {stats['cancelled']}"
+        )
+        await _edit(query, text)
+        return
+    elif action == "limits":
+        summary = rt.settings.summary()
+        summary["mtproto_state"] = getattr(rt.uploader, "state", "off")
+        await _edit(query, texts.limits_text(summary))
+        return
+    elif action == "about":
+        await _edit(query, texts.about_text(VERSION))
+        return
+
+    # Everything else, and the diag refresh: rebuild the diagnostics panel.
+    stats = rt.manager.stats(rt.settings)
+    facts = {
+        "cpu": budget_note(),
+        "mtproto": "unavailable" if rt.uploader is None else getattr(rt.uploader, "state", "off"),
+        "mtproto_error": "" if rt.uploader is None else getattr(rt.uploader, "last_error", ""),
+        "cached_tracks": len(rt.tracks),
+        "assets": rt.assets.describe() if rt.assets is not None else {},
+        "notes": rt.settings.warnings(),
+    }
+    await _edit(query, texts.diagnostics(rt.settings.summary(), stats, facts), markup=diagnostics_keyboard())

@@ -37,6 +37,7 @@ from pathlib import Path
 
 from bot.errors import DownloadError, ProbeError
 from bot.process import StreamResult, run_command, run_streaming
+from bot.utils import auto_workers
 from config import Settings
 
 log = logging.getLogger("bot.typetube")
@@ -426,7 +427,11 @@ def download_command(
         command += ["--video-only", "-f", quality, "-c", codec, "--ext", "mp4"]
     else:
         command += ["-v", "-f", quality, "-a", audio_quality, "-c", codec, "--ext", "mp4"]
-    command += ["-N", str(settings.typetube_workers), "--chunk-size", str(settings.typetube_chunk_mb)]
+    # Parallel range workers: an explicit setting wins, otherwise the count is derived from
+    # the CPU budget the host really grants this container (see bot.utils.cpu_budget). The
+    # chunk size is the other throughput knob — bigger chunks mean fewer round trips.
+    workers = settings.typetube_workers or auto_workers()
+    command += ["-N", str(workers), "--chunk-size", str(settings.typetube_chunk_mb)]
     return command
 
 

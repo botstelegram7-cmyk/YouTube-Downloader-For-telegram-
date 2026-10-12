@@ -54,6 +54,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY config.py main.py ./
 COPY bot ./bot
+COPY assets ./assets
 COPY scripts ./scripts
 
 # Run as a non-root user; the download directory is the only writable path needed.

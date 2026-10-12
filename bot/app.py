@@ -19,14 +19,18 @@ from telegram.ext import (
 )
 
 from bot import texts
+from bot.access import Access
+from bot.assets import AssetLibrary
 from bot.handlers import (
     abort_callback,
     about_command,
     cancel_callback,
     cancel_command,
+    diag_command,
     help_command,
     id_command,
     limits_command,
+    nav_callback,
     on_error,
     on_link,
     quality_callback,
@@ -73,12 +77,15 @@ def build_application(settings: Settings) -> Application:
     application = builder.build()
 
     uploader = MtprotoUploader(settings)
-    job_manager = JobManager(settings, application.bot, uploader=uploader)
+    assets = AssetLibrary(cache_path=settings.resolved_asset_cache_path)
+    job_manager = JobManager(settings, application.bot, uploader=uploader, assets=assets)
     application.bot_data[BOT_DATA_KEY] = Runtime(
         settings=settings,
         manager=job_manager,
         tracks=TrackCache(),
         uploader=uploader,
+        assets=assets,
+        access=Access(settings),
     )
 
     # Commands -----------------------------------------------------------------
@@ -89,12 +96,14 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("limits", limits_command))
     application.add_handler(CommandHandler("id", id_command))
     application.add_handler(CommandHandler("about", about_command))
+    application.add_handler(CommandHandler("diag", diag_command))
 
     # Links and buttons ---------------------------------------------------------
     application.add_handler(MessageHandler(COMMAND_FILTER | filters.Caption(), on_link))
     application.add_handler(CallbackQueryHandler(quality_callback, pattern=r"^dl:"))
     application.add_handler(CallbackQueryHandler(cancel_callback, pattern=r"^cancel:"))
     application.add_handler(CallbackQueryHandler(abort_callback, pattern=r"^abort:"))
+    application.add_handler(CallbackQueryHandler(nav_callback, pattern=r"^nav:"))
 
     application.add_error_handler(on_error)
     return application
@@ -111,9 +120,18 @@ async def on_startup(application: Application) -> None:
 
     await _publish_commands(application)
 
+    # Resolve OWNER_USERNAME → id before anything needs it (a public lookup, once).
+    if rt.access is not None and not rt.access.owner_id:
+        await rt.access.resolve_owner(application.bot)
     try:
         me = await application.bot.get_me()
-        log.info("Connected as @%s (id %s)", me.username, me.id)
+        rt.bot_username = me.username or ""
+        log.info(
+            "Connected as @%s (id %s) — open to everyone; owner is %s",
+            me.username,
+            me.id,
+            rt.access.owner_label if rt.access is not None else "unset",
+        )
     except TelegramError as exc:
         log.error("Could not verify the bot token with getMe: %s", exc)
         return

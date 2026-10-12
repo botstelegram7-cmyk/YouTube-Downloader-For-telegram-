@@ -52,6 +52,15 @@ async def on_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     rt = runtime(context)
+
+    # Fairness delay: the bot is open to everyone, so one person cannot flood the queue.
+    # The owner is exempt (an operator testing their own bot should never be told to wait).
+    remaining = rt.access.cooldown_remaining(user.id)
+    if remaining > 0:
+        await message.reply_text(texts.cooldown(remaining), parse_mode=ParseMode.HTML)
+        return
+    rt.access.mark_request(user.id)
+
     status = await message.reply_text(texts.analyzing(url), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
     task = asyncio.create_task(

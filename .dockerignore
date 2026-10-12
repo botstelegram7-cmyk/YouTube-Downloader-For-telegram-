@@ -11,8 +11,9 @@ env
 .ruff_cache
 .arena
 
-# Tests and docs are not part of the runtime image; scripts/ is, because operators
-# generate their session string with `python scripts/make_session.py` inside it.
+# Tests and docs are not part of the runtime image. scripts/ and assets/ are: the
+# end-to-end harness runs inside the image, and the bot sends the start picture and the
+# progress animations from assets/.
 tests
 docs
 *.md

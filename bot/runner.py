@@ -65,13 +65,17 @@ async def run_bot(settings: Settings) -> None:
         phase("handlers live")
 
         if settings.runs_webhook:
-            await _register_webhook(application, settings)
-            phase("webhook registered")
+            if await _register_webhook(application, settings):
+                phase("webhook registered")
+            else:
+                # Telegram will not deliver a single update to a webhook it refused, and a
+                # bot that receives no updates looks "offline" to its users. Polling needs
+                # no inbound route, so it keeps the bot usable while the operator fixes the
+                # webhook. An earlier version logged "webhook registered" no matter what.
+                await _start_polling(application)
+                phase("webhook REFUSED by Telegram — long polling started instead")
         else:
-            await application.updater.start_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True,
-            )
+            await _start_polling(application)
             phase("long polling started (no WEBHOOK_URL configured)")
 
         # 3. Announce ourselves. initialize() does not call post_init (only
@@ -130,7 +134,20 @@ async def _start_web_server(application: Application, settings: Settings) -> web
     return runner
 
 
-async def _register_webhook(application: Application, settings: Settings) -> None:
+async def _start_polling(application: Application) -> None:
+    """Fetch updates by long polling — the mode that needs no inbound route."""
+    await application.updater.start_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
+
+
+async def _register_webhook(application: Application, settings: Settings) -> bool:
+    """Point Telegram at this service. Returns True only if Telegram accepted the URL.
+
+    The caller must not report success on a failure: a refused webhook means zero incoming
+    updates, which is exactly what "the bot went offline" looks like from the outside.
+    """
     try:
         await application.bot.set_webhook(
             url=settings.webhook_target,
@@ -139,14 +156,21 @@ async def _register_webhook(application: Application, settings: Settings) -> Non
             drop_pending_updates=True,
             max_connections=40,
         )
-        log.info("Webhook registered at %s", settings.webhook_target)
     except TelegramError as exc:
+        hint = ""
+        if "secret token" in str(exc).lower():
+            hint = " WEBHOOK_SECRET must use only A-Z a-z 0-9 _ - (it is cleaned at startup)."
         log.error(
-            "Could not register the webhook at %s: %s\n"
-            "Check that WEBHOOK_URL is the public https address of this service.",
+            "Telegram refused the webhook at %s: %s\n"
+            "Check that the URL is the public https address of this service and that it "
+            "resolves from the internet.%s",
             settings.webhook_target,
             exc,
+            hint,
         )
+        return False
+    log.info("Webhook registered at %s", settings.webhook_target)
+    return True
 
 
 def _install_signal_handlers(stop: asyncio.Event) -> None:

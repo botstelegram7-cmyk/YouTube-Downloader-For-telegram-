@@ -17,6 +17,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("limits", "Why files are capped and how to raise the cap"),
     ("id", "Show your chat id (for OWNER_USER_ID)"),
     ("about", "Version, engine and credits"),
+    ("diag", "Operator diagnostics (owner only)"),
 )
 
 
@@ -56,8 +57,9 @@ def _transport_label(summary: dict) -> str:
     )
 
 
-def welcome(name: str, version: str) -> str:
+def welcome(name: str, version: str, *, owner: str = "") -> str:
     """``/start`` — the introduction users see first."""
+    credit = f"\n<b>Owner</b>: {esc(owner)}" if owner else ""
     return (
         f"👋 <b>Welcome to {esc(name)}</b>\n"
         f"<i>v{esc(version)} · TypeTube engine · FFmpeg delivery</i>\n"
@@ -68,12 +70,15 @@ def welcome(name: str, version: str) -> str:
         "<b>What you get</b>\n"
         "• 🎬 MP4 with sound, thumbnail and a clean caption\n"
         "• 🎵 Audio only, as M4A\n"
-        "• ⚡️ Downloads run on parallel range workers, so no throttling\n"
+        "• ⚡️ Parallel range workers, so downloads run at full speed\n"
+        "• 📈 Live progress with speed and ETA while it runs\n"
+        "• 👥 Free for everyone — no account, no limits of mine\n"
         "\n"
         "<b>Good to know</b>\n"
         "• One download at a time — a new link replaces the running one\n"
         "• <code>/cancel</code> stops everything instantly\n"
-        "• Buttons are colour-coded: green is recommended, red cancels\n"
+        "• Buttons are colour-coded: green is recommended, red cancels"
+        f"{credit}\n"
     )
 
 
@@ -139,6 +144,37 @@ def startup_report(version: str, summary: dict, warnings: list[str]) -> str:
         lines += [f"• {esc(note)}" for note in warnings[:4]]
     lines += ["", commands_list()]
     return "\n".join(lines)
+
+
+def card_caption(title: str, quality: str, phase: str) -> str:
+    """The caption a phase switch puts on the animated status card.
+
+    Deliberately short: the card itself carries the animation, and the live numbers arrive in
+    the following edits. Telegram caps captions at 1024 characters, and a long one would be
+    replaced by the first progress edit anyway.
+    """
+    label = {"download": "⬇️ Downloading", "upload": "⬆️ Uploading to Telegram"}.get(phase, "⏳ Working")
+    return f"{label} — {esc(quality)}\n<i>{esc(title[:70])}</i>\n\nStarting…"
+
+
+def cooldown(seconds: float) -> str:
+    """Shown when someone asks for links faster than the fairness delay allows."""
+    remaining = max(1, round(seconds))  # whole seconds, never "0s"
+    return (
+        "⏳ <b>One moment</b>\n"
+        f"Give the queue {remaining}s before the next link — the bot is shared, and this keeps it "
+        "fair for everyone.\n\n<i>Your link was not ignored; send it again in a few seconds.</i>"
+    )
+
+
+def owner_only(action: str = "/diag") -> str:
+    """A refusal that explains itself instead of pretending the command does not exist."""
+    return (
+        "🔒 <b>Owner only</b>\n"
+        f"<code>{esc(action)}</code> is for the bot's operator — it shows the server's internals "
+        "(CPU budget, queue, disk, transport state).\n\n"
+        "<i>Everything else in this bot is open to you: send a link and download.</i>"
+    )
 
 
 def analyzing(url: str) -> str:
@@ -360,6 +396,63 @@ def limits_text(summary: dict) -> str:
         "that would fill the disk is refused rather than half-finished, and partial files are deleted. "
         "Bigger files need a bigger disk — that is hosting, not policy.",
     ]
+    return "\n".join(lines)
+
+
+def diagnostics(summary: dict, stats: dict, runtime: dict) -> str:
+    """``/diag`` — the operator's view: host budget, queue, disk, transports, assets.
+
+    Owner-only on purpose: it exposes the server's internals (CPU quota, free disk, engine
+    settings) which are nobody else's business, and it is the first thing to look at when a
+    download feels slow.
+    """
+    lines = [
+        "🩺 <b>Diagnostics</b> <i>(owner only)</i>",
+        "",
+        "<b>Build</b>",
+        f"• version: <code>{esc(str(summary.get('version')))}</code>",
+        f"• engine: {esc(str(summary.get('engine')))} · {esc(str(summary.get('typetube_host')))}",
+        f"• engine key: {esc(str(summary.get('typetube_key')))}",
+        f"• download workers: <code>{esc(str(summary.get('typetube_workers')))}</code>",
+        f"• FFmpeg: <code>{esc(str(summary.get('ffmpeg')))}</code>",
+        "",
+        "<b>Host</b>",
+        f"• CPU budget: {esc(str(runtime.get('cpu')))}",
+        f"• free disk: {esc(str(stats.get('free_disk')))} · floor {summary.get('min_free_disk_mb')} MB",
+        f"• parallel jobs: {stats.get('active')}/{stats.get('slots')}",
+        "",
+        "<b>Delivery</b>",
+        f"• transport: {esc(str(summary.get('upload_transport')))}"
+        f" · ceiling {summary.get('upload_capability_mb')} MB",
+        f"• MTProto: {esc(str(runtime.get('mtproto')))}"
+        + (f" — <i>{esc(str(runtime.get('mtproto_error'))[:120])}</i>" if runtime.get("mtproto_error") else ""),
+        f"• connections per upload: {summary.get('mt_connections')}",
+        f"• mode: {esc(str(summary.get('mode')))} · port {summary.get('port')}"
+        + (
+            f" · URL from {esc(str(summary.get('webhook_source')))}"
+            if summary.get("stale_webhook_url")
+            else ""
+        ),
+        *(
+            [
+                f"• ⚠️ WEBHOOK_URL {esc(str(summary.get('stale_webhook_url')))} is not this "
+                f"service — using {esc(str(summary.get('webhook')))}"
+            ]
+            if summary.get("stale_webhook_url")
+            else []
+        ),
+        "",
+        "<b>This session</b>",
+        f"• delivered {stats.get('completed')} · failed {stats.get('failed')} · cancelled {stats.get('cancelled')}",
+        f"• cached tracks: {runtime.get('cached_tracks', 0)}",
+    ]
+    assets = runtime.get("assets")
+    if assets:
+        lines += ["", "<b>Assets</b>"]
+        lines += [f"• {esc(name)}: {esc(str(state))}" for name, state in assets.items()]
+    if runtime.get("notes"):
+        lines += ["", "⚠️ <b>Notes</b>"]
+        lines += [f"• {esc(str(note))}" for note in runtime["notes"][:4]]
     return "\n".join(lines)
 
 

@@ -83,20 +83,39 @@ def cancel_keyboard(job_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[_button("❌ Cancel download", f"cancel:{job_id}", STYLE_DANGER)]])
 
 
-def welcome_keyboard() -> InlineKeyboardMarkup:
-    """The /start screen's shortcuts."""
-    return InlineKeyboardMarkup(
+def welcome_keyboard(bot_username: str = "", owner_username: str = "") -> InlineKeyboardMarkup:
+    """The /start screen's shortcuts, plus the two things a public bot always needs."""
+    rows = [
         [
-            [
-                _button("📖 How to use", "nav:help", STYLE_PRIMARY),
-                _button("📊 Status", "nav:status", STYLE_PRIMARY),
-            ],
-            [
-                _button("📦 Size limits", "nav:limits", STYLE_PRIMARY),
-                _button("ℹ️ About", "nav:about", STYLE_PRIMARY),
-            ],
-        ]
-    )
+            _button("📖 How to use", "nav:help", STYLE_PRIMARY),
+            _button("📊 Status", "nav:status", STYLE_PRIMARY),
+        ],
+        [
+            _button("📦 Size limits", "nav:limits", STYLE_PRIMARY),
+            _button("ℹ️ About", "nav:about", STYLE_PRIMARY),
+        ],
+    ]
+    links = []
+    if bot_username:
+        links.append(
+            InlineKeyboardButton(
+                "➕ Add to a group",
+                url=f"https://t.me/{bot_username}?startgroup=true",
+                style=STYLE_SUCCESS,
+            )
+        )
+    if owner_username:
+        links.append(
+            InlineKeyboardButton("👤 Owner", url=f"https://t.me/{owner_username}", style=STYLE_PRIMARY)
+        )
+    if links:
+        rows.append(links)
+    return InlineKeyboardMarkup(rows)
+
+
+def diagnostics_keyboard() -> InlineKeyboardMarkup:
+    """The operator's refresh button — the only place /diag is reachable from."""
+    return InlineKeyboardMarkup([[_button("🔄 Refresh", "nav:diag", STYLE_PRIMARY)]])
 
 
 def delivered_keyboard(source_url: str) -> InlineKeyboardMarkup:

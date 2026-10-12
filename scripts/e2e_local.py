@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -65,7 +66,8 @@ LINK = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 STUB_TITLE = "E2E Test clip"
 WEBHOOK_SECRET = "e2e-local-secret"
 CHAT_ID = 5550001
-USER_ID = 5550001
+OWNER_USER_ID = 5550001  # the operator: sees /diag, never throttled
+USER_ID = 6660002  # an ordinary user of the public bot
 
 
 def log(message: str) -> None:
@@ -223,6 +225,59 @@ class MockBotAPI:
                     "caption": str(fields.get("caption", "")),
                 },
             )
+        elif method == "sendPhoto":
+            result = self._message(
+                chat_id,
+                "",
+                {
+                    "photo": [
+                        {
+                            "file_id": "mock-start-image",
+                            "file_unique_id": "mock-start-image-u",
+                            "width": 1280,
+                            "height": 714,
+                            "file_size": 90000,
+                        }
+                    ],
+                    "caption": str(fields.get("caption", "")),
+                },
+            )
+        elif method == "sendAnimation":
+            result = self._message(
+                chat_id,
+                "",
+                {
+                    "animation": {
+                        "file_id": "mock-progress-animation",
+                        "file_unique_id": "mock-progress-u",
+                        "width": 480,
+                        "height": 270,
+                        "duration": 2,
+                        "file_name": str(fields.get("animation_name") or "progress.gif"),
+                        "mime_type": "image/gif",
+                        "file_size": 460000,
+                    },
+                    "caption": str(fields.get("caption", "")),
+                },
+            )
+        elif method == "editMessageMedia" or method == "editMessageCaption":
+            result = self._message(
+                chat_id,
+                "",
+                {
+                    "animation": {
+                        "file_id": "mock-progress-animation",
+                        "file_unique_id": "mock-progress-u",
+                        "width": 480,
+                        "height": 270,
+                        "duration": 2,
+                        "file_name": "progress.gif",
+                        "mime_type": "image/gif",
+                        "file_size": 460000,
+                    },
+                    "caption": str(fields.get("caption", "")),
+                },
+            )
         elif method == "getWebhookInfo":
             result = {"url": "", "has_custom_certificate": False, "pending_update_count": 0}
 
@@ -316,17 +371,33 @@ async def post_webhook(session: ClientSession, url: str, payload: dict) -> None:
             raise RuntimeError(f"Webhook returned {response.status}")
 
 
-def update_message(text: str) -> dict:
-    return {
-        "update_id": 1,
-        "message": {
-            "message_id": 7,
-            "date": int(time.time()),
-            "chat": {"id": CHAT_ID, "type": "private", "first_name": "E2E"},
-            "from": {"id": USER_ID, "is_bot": False, "first_name": "E2E"},
-            "text": text,
-        },
+_COMMAND = re.compile(r"^/[A-Za-z0-9_]{1,32}(?:@[A-Za-z0-9_]{1,32})?$")
+
+
+def _entities_for(text: str) -> list[dict] | None:
+    """What the real Bot API attaches to a message: a bot_command entity on the leading token.
+
+    python-telegram-bot's CommandHandler matches on that entity, not on the raw text, so a
+    hand-written update without it is silently dropped by every command handler.
+    """
+    token = text.split(maxsplit=1)[0] if text else ""
+    if _COMMAND.match(token):
+        return [{"type": "bot_command", "offset": 0, "length": len(token)}]
+    return None
+
+
+def update_message(text: str, *, user_id: int = USER_ID, update_id: int = 1, message_id: int = 7) -> dict:
+    message: dict = {
+        "message_id": message_id,
+        "date": int(time.time()),
+        "chat": {"id": user_id, "type": "private", "first_name": "E2E"},
+        "from": {"id": user_id, "is_bot": False, "first_name": "E2E"},
+        "text": text,
     }
+    entities = _entities_for(text)
+    if entities:
+        message["entities"] = entities
+    return {"update_id": update_id, "message": message}
 
 
 def update_callback(data: str, message_id: int) -> dict:
@@ -405,6 +476,8 @@ async def run(args: argparse.Namespace) -> int:
             "MAX_CONCURRENT_JOBS": "1",
             "PROGRESS_INTERVAL": "0.5",
             "STARTUP_NOTIFY_CHAT_ID": str(CHAT_ID),
+            # The operator: only this id may use /diag, and it is never throttled.
+            "OWNER_USER_ID": str(OWNER_USER_ID),
             "LOG_LEVEL": "INFO",
             "LOG_PRETTY": "false",
             "PYTHONUNBUFFERED": "1",
@@ -433,19 +506,33 @@ async def run(args: argparse.Namespace) -> int:
 
         deadline = time.monotonic() + 60
         health = None
+        public_health = None
         early_exit: int | None = None
+        # Two views of the same endpoint: the platform's shallow probe (no secret) and the
+        # operator's detailed one. Both must answer; only one may leak internals.
+        operator_headers = {"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET}
         while time.monotonic() < deadline:
             if bot_process.poll() is not None:
                 early_exit = bot_process.returncode
                 break
             try:
                 async with session.get(f"http://127.0.0.1:{args.bot_port}/health") as response:
-                    health = await response.json()
-                    if health.get("ok"):
+                    public_health = await response.json()
+                    if public_health.get("ok"):
                         break
             except Exception:
-                health = None
+                public_health = None
             await asyncio.sleep(0.5)
+
+        if public_health and public_health.get("ok"):
+            ok(f"/health answers the platform's probe: {sorted(public_health)}")
+            if "jobs" in public_health or "runtime" in public_health:
+                failures.append("the public health payload exposes internals")
+                fail("the public health payload exposes internals")
+            async with session.get(
+                f"http://127.0.0.1:{args.bot_port}/health", headers=operator_headers
+            ) as response:
+                health = await response.json()
 
         if early_exit is not None:
             failures.append(f"the bot exited with code {early_exit} before serving /health")
@@ -490,9 +577,98 @@ async def run(args: argparse.Namespace) -> int:
         if commands:
             ok("command menu published to Telegram")
 
+        # 3b. /start: picture, shortcuts, owner credit, add-to-group link -------
+        log("Sending /start")
+        await post_webhook(session, f"{webhook_url}/telegram", update_message("/start", update_id=10, message_id=11))
+        # (the ordinary user's own chat is the same numeric id space in this harness)
+        started = await wait_for(
+            lambda: mock.calls_of("sendPhoto"),
+            timeout=30,
+            what="the /start picture",
+            abort=bot_is_gone,
+        )
+        caption = str(started[-1]["fields"].get("caption", ""))
+        ok(f"/start sent a real picture ({started[-1]['files']}) with a caption")
+        keyboard_markup = str(started[-1]["fields"].get("reply_markup", ""))
+        if "startgroup" not in keyboard_markup:
+            failures.append("the /start keyboard is missing the add-to-group link")
+            fail("add-to-group link missing from /start")
+        else:
+            ok("the /start keyboard offers adding the bot to a group")
+        if "Owner" not in caption:
+            failures.append("the /start caption does not credit the owner")
+            fail("owner credit missing from /start")
+        else:
+            ok(f"the /start caption credits the owner ({caption.split('Owner</b>: ')[-1].splitlines()[0]})")
+        if "/diag" not in caption or len(caption) > 1024:
+            shortcuts = [call for call in mock.calls_of("sendMessage") if "/diag" in str(call["fields"].get("text", ""))]
+            if shortcuts:
+                ok("the command list follows the picture as its own message")
+            else:
+                failures.append("the /start shortcuts went missing")
+                fail("the command list never arrived")
+
+        # 3c. /diag is owner-only --------------------------------------------
+        log(f"Sending /diag as a normal user ({USER_ID})")
+        await post_webhook(session, f"{webhook_url}/telegram", update_message("/diag", update_id=11, message_id=12))
+        refusal = await wait_for(
+            lambda: [
+                call
+                for call in mock.calls_of("sendMessage")
+                if "Owner only" in str(call["fields"].get("text", ""))
+            ],
+            timeout=30,
+            what="the owner-only refusal",
+            abort=bot_is_gone,
+        )
+        ok(f"/diag is refused for a normal user: {str(refusal[-1]['fields']['text'])[:48]!r}")
+
+        log(f"Sending /diag as the owner ({OWNER_USER_ID})")
+        await post_webhook(
+            session,
+            f"{webhook_url}/telegram",
+            update_message("/diag", user_id=OWNER_USER_ID, update_id=12, message_id=13),
+        )
+        panel = await wait_for(
+            lambda: [
+                call
+                for call in mock.calls_of("sendMessage")
+                if "Diagnostics" in str(call["fields"].get("text", ""))
+            ],
+            timeout=30,
+            what="the owner's diagnostics panel",
+            abort=bot_is_gone,
+        )
+        panel_text = str(panel[-1]["fields"]["text"])
+        ok("the owner sees the diagnostics panel")
+        for expected in ("CPU budget", "free disk", "transport", "delivered"):
+            if expected not in panel_text:
+                failures.append(f"the diagnostics panel is missing {expected!r}")
+                fail(f"diagnostics panel missing {expected!r}")
+
+        # 3d. the fair-use cooldown ------------------------------------------
+        log("Sending two links back to back as a normal user")
+        await post_webhook(session, f"{webhook_url}/telegram", update_message(LINK, update_id=13, message_id=14))
+        await post_webhook(session, f"{webhook_url}/telegram", update_message(LINK, update_id=14, message_id=15))
+        await wait_for(
+            lambda: [
+                call
+                for call in mock.calls_of("sendMessage")
+                if "One moment" in str(call["fields"].get("text", ""))
+            ],
+            timeout=30,
+            what="the cooldown notice",
+            abort=bot_is_gone,
+        )
+        ok("the second link inside the fairness delay is answered with a cooldown notice")
+
         # 4. send a link ------------------------------------------------------
         log(f"Sending a link: {LINK}")
-        await post_webhook(session, f"{webhook_url}/telegram", update_message(LINK))
+        await post_webhook(
+            session,
+            f"{webhook_url}/telegram",
+            update_message(LINK, user_id=OWNER_USER_ID, update_id=15, message_id=16),
+        )
 
         keyboard_calls = await wait_for(
             lambda: [
@@ -525,6 +701,16 @@ async def run(args: argparse.Namespace) -> int:
         )
         call = delivered[0]
         ok(f"delivered with {call['method']}")
+
+        animations = mock.calls_of("sendAnimation")
+        if animations:
+            ok(f"the status card is animated ({animations[0]['files']})")
+            media_edits = mock.calls_of("editMessageMedia")
+            if media_edits:
+                ok("the card switched animation when the upload phase started")
+        else:
+            failures.append("the status card was not animated")
+            fail("no animated status card")
 
         # 6. assertions -------------------------------------------------------
         def check(condition: bool, description: str) -> None:
@@ -568,6 +754,27 @@ async def run(args: argparse.Namespace) -> int:
         log_text = log_path.read_text(errors="replace")
         check("Stopped. Goodbye." in log_text, "graceful shutdown logged")
         check("Traceback" not in log_text, "no unhandled exception in the log")
+
+        # Telegram's own hard limits: a caption is 1024 characters, a text message 4096.
+        # A mock accepts anything, so check them here — production would reject them.
+        over_caption = [
+            call["method"]
+            for call in mock.calls
+            if len(str(call["fields"].get("caption", ""))) > 1024
+        ]
+        over_text = [
+            call["method"] for call in mock.calls if len(str(call["fields"].get("text", ""))) > 4096
+        ]
+        check(
+            not over_caption,
+            "every caption is inside Telegram's 1024-character limit"
+            + (f" — offending calls: {over_caption}" if over_caption else ""),
+        )
+        check(
+            not over_text,
+            "every message is inside Telegram's 4096-character limit"
+            + (f" — offending calls: {over_text}" if over_text else ""),
+        )
 
         if args.mtproto_unreachable:
             # The deploy failure in one assertion: the port is bound *before* the MTProto

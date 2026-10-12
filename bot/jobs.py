@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 from telegram import Bot
+from telegram.error import TelegramError
 
 from bot import texts
 from bot.download import DownloadResult, ProgressUpdate, download_media
@@ -40,7 +41,7 @@ from bot.errors import (
 )
 from bot.keyboards import cancel_keyboard, retry_keyboard
 from bot.process import ProcessRegistry
-from bot.progress import StatusReporter
+from bot.progress import ProgressCard
 from bot.qualities import QualityOption, build_options, smaller_video_options
 from bot.texts import cancelled as cancelled_text
 from bot.typetube import Track
@@ -80,7 +81,7 @@ class Job:
     token: str = ""
     reply_to_message_id: int | None = None
     track: Track | None = None
-    status: StatusReporter | None = None
+    status: ProgressCard | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     registry: ProcessRegistry = field(default_factory=ProcessRegistry)
@@ -111,10 +112,11 @@ class Job:
 class JobManager:
     """Owns every running job: start, cancel, report, clean up."""
 
-    def __init__(self, settings: Settings, bot: Bot, uploader=None) -> None:
+    def __init__(self, settings: Settings, bot: Bot, uploader=None, assets=None) -> None:
         self.settings = settings
         self.bot = bot
         self.uploader = uploader
+        self.assets = assets
         self._jobs: dict[int, Job] = {}
         self._lock = asyncio.Lock()
         self._slots = asyncio.Semaphore(max(1, settings.max_concurrent_jobs))
@@ -187,7 +189,7 @@ class JobManager:
                 reply_to_message_id=reply_to_message_id,
             )
             if status_message is not None:
-                job.status = StatusReporter(
+                job.status = ProgressCard(
                     self.bot,
                     chat_id,
                     status_message,
@@ -279,33 +281,90 @@ class JobManager:
                 await self._cleanup(job)
                 self._jobs.pop(job.user_id, None)
 
+    async def _open_card(self, job: Job) -> ProgressCard:
+        """Send the status card: an animated one when rich messages are on, else text.
+
+        The card is created *as media* when animation is enabled, because Telegram can only
+        replace the media of a message that already has some — a text message can never
+        become a GIF later.
+        """
+        loop = asyncio.get_running_loop()
+        markup = cancel_keyboard(job.id)
+        caption = texts.job_started(job.title, job.quality_label)
+
+        if self.settings.rich_messages and self.assets is not None:
+            asset = self.assets.animation("progress")
+            if asset is not None:
+                from telegram import InputFile
+
+                animation = self.assets.file_id(asset.name) or InputFile(
+                    asset.bytes(), filename=asset.name
+                )
+                try:
+                    message = await self.bot.send_animation(
+                        chat_id=job.chat_id,
+                        animation=animation,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=markup,
+                    )
+                    card = ProgressCard(
+                        self.bot,
+                        job.chat_id,
+                        message,
+                        interval=self.settings.progress_interval,
+                        loop=loop,
+                        keyboard=markup,
+                        animated=True,
+                    )
+                    card.assets = self.assets
+                    card.remember_media(asset.name, message)
+                    return card
+                except TelegramError as exc:
+                    # Telegram would not take the animation: a text card is still a good card.
+                    log.warning("Animated status card unavailable (%s); using text", exc)
+
+        message = await self.bot.send_message(
+            chat_id=job.chat_id,
+            text=caption,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=markup,
+        )
+        return ProgressCard(
+            self.bot,
+            job.chat_id,
+            message,
+            interval=self.settings.progress_interval,
+            loop=loop,
+            keyboard=markup,
+        )
+
     async def _execute(self, job: Job) -> None:
         settings = self.settings
 
         if job.status is None:
-            message = await self.bot.send_message(
-                chat_id=job.chat_id,
-                text=texts.job_started(job.title, job.quality_label),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=cancel_keyboard(job.id),
-            )
-            job.status = StatusReporter(
-                self.bot,
-                job.chat_id,
-                message,
-                interval=settings.progress_interval,
-                loop=asyncio.get_running_loop(),
-                keyboard=cancel_keyboard(job.id),
-            )
+            job.status = await self._open_card(job)
 
         job.temp_dir = make_temp_dir(settings.download_dir, prefix=f"job-{job.id}-")
 
         async with self._slots:
             job.phase = "download"
+            if self.assets is not None and job.status is not None:
+                job.status.show_animation(
+                    self.assets.animation("progress"),
+                    texts.card_caption(job.title, job.quality_label, "download"),
+                    key="download",
+                )
             result = await self._download_phase(job)
 
             job.phase = "upload"
+            if self.assets is not None and job.status is not None:
+                job.status.show_animation(
+                    self.assets.animation("upload"),
+                    texts.card_caption(job.title, job.quality_label, "upload"),
+                    key="upload",
+                )
             outcome = await send_media(
                 bot=self.bot,
                 chat_id=job.chat_id,

@@ -16,3 +16,7 @@ PyroTgCrypto>=1.2.7,<2
 
 # HTTP server for the webhook + /health endpoint of the Web Service deployment.
 aiohttp>=3.10,<4
+
+# The start picture and the progress GIFs are pre-rendered in assets/, so nothing here needs
+# Python imaging at runtime. scripts/make_assets.py regenerates them; the dependency lives in
+# requirements-dev.txt to keep the image lean.

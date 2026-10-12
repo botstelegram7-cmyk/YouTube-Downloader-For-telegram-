@@ -1,21 +1,26 @@
-"""``/`` commands: introduction, help, status, cancel, limits and chat id."""
+"""``/`` commands: introduction, help, status, cancel, limits, diagnostics and chat id."""
 
 from __future__ import annotations
 
 import logging
 
-from telegram import Update
+from telegram import InputFile, Update
 from telegram.constants import ParseMode
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from bot import texts
+from bot import keyboards, texts
 from bot.runtime import runtime
-from bot.utils import disk_free_bytes, human_size
+from bot.utils import budget_note, disk_free_bytes, human_size
 from config import PROJECT_NAME, VERSION
 
 log = logging.getLogger("bot.handlers.commands")
 
 HTML = ParseMode.HTML
+
+# Telegram caps photo and animation captions at 1024 characters; text messages get 4096.
+CAPTION_LIMIT = 1024
+MESSAGE_LIMIT = 4096
 
 
 async def _reply(update: Update, text: str, **kwargs):
@@ -28,8 +33,75 @@ async def _reply(update: Update, text: str, **kwargs):
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """The introduction: what the bot does, and how to use it."""
-    await _reply(update, texts.welcome(PROJECT_NAME, VERSION) + "\n" + texts.commands_list())
+    """The introduction: a real picture, the shortcuts, and what the bot can do."""
+    rt = runtime(context)
+    message = update.effective_message
+    if message is None:
+        return
+
+    welcome = texts.welcome(PROJECT_NAME, VERSION, owner=rt.owner_label)
+    commands = texts.commands_list()
+    combined = f"{welcome}\n{commands}"
+    markup = keyboards.welcome_keyboard(bot_username=rt.bot_username, owner_username=rt.settings.owner_username)
+
+    asset = rt.assets.get("start.jpg") if rt.assets is not None else None
+    if asset is not None and rt.settings.rich_messages:
+        photo = rt.assets.file_id(asset.name) or InputFile(asset.bytes(), filename=asset.name)
+        # A picture caption is capped at 1024 characters, and the greeting plus the command
+        # list is longer than that: the greeting rides on the picture, the list follows it.
+        caption = combined if len(combined) <= CAPTION_LIMIT else welcome[:CAPTION_LIMIT]
+        try:
+            sent = await message.reply_photo(
+                photo=photo,
+                caption=caption,
+                parse_mode=HTML,
+                reply_markup=markup,
+            )
+            # Telegram returns an id for the bytes it stored; reuse it forever after.
+            photos = getattr(sent, "photo", None) or []
+            if photos:
+                rt.assets.remember(asset.name, photos[-1].file_id)
+            if caption != combined:
+                await _reply(update, commands)
+            return
+        except TelegramError as exc:
+            log.warning("Could not send the start picture (%s); falling back to text", exc)
+
+    if len(combined) <= MESSAGE_LIMIT:
+        await message.reply_text(
+            combined,
+            parse_mode=HTML,
+            disable_web_page_preview=True,
+            reply_markup=markup,
+        )
+        return
+    await message.reply_text(
+        welcome,
+        parse_mode=HTML,
+        disable_web_page_preview=True,
+        reply_markup=markup,
+    )
+    await _reply(update, commands)
+
+
+async def diag_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """``/diag`` — owner-only view of the host, the queue and the transports."""
+    rt = runtime(context)
+    user = update.effective_user
+    if not rt.access.is_owner(user.id if user else None):
+        await _reply(update, texts.owner_only("/diag"))
+        return
+
+    stats = rt.manager.stats(rt.settings)
+    runtime_facts = {
+        "cpu": budget_note(),
+        "mtproto": "unavailable" if rt.uploader is None else getattr(rt.uploader, "state", "off"),
+        "mtproto_error": "" if rt.uploader is None else getattr(rt.uploader, "last_error", ""),
+        "cached_tracks": len(rt.tracks),
+        "assets": rt.assets.describe() if rt.assets is not None else {},
+        "notes": rt.settings.warnings(),
+    }
+    await _reply(update, texts.diagnostics(rt.settings.summary(), stats, runtime_facts))
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

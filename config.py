@@ -32,12 +32,14 @@ Sections
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-VERSION = "3.3.1"
+VERSION = "3.3.2"
 PROJECT_NAME = "YouTube Downloader for Telegram"
 
 # --------------------------------------------------------------------------- #
@@ -144,6 +146,34 @@ def _resolve_ffprobe(ffmpeg_path: str) -> str:
     return shutil.which("ffprobe") or "ffprobe"
 
 
+#: Telegram accepts exactly this alphabet for the webhook secret token. Render's
+#: ``generateValue`` (and plenty of password generators) produce values containing
+#: ``+``, ``/`` and ``=``, which makes ``setWebhook`` fail with
+#: "Secret token contains illegal characters" — and a failed registration means the bot
+#: never receives an update, i.e. it looks offline. Sanitising here turns that outage
+#: into a warning.
+SECRET_ALPHABET = re.compile(r"[^A-Za-z0-9_-]")
+MAX_SECRET_LENGTH = 256
+
+
+def url_host(url: str) -> str:
+    """Host of a URL, lower-cased and without a port — for comparing two of them."""
+    text = (url or "").strip()
+    if "//" not in text:
+        return text.rstrip("/").lower()
+    return urlsplit(text).netloc.lower() if urlsplit(text).netloc else text.rstrip("/").lower()
+
+
+def sanitize_webhook_secret(value: str) -> str:
+    """Return ``value`` restricted to Telegram's secret-token alphabet."""
+    return SECRET_ALPHABET.sub("", value or "")[:MAX_SECRET_LENGTH]
+
+
+def normalize_username(value: str) -> str:
+    """``@TechnicslSerena`` → ``TechnicslSerena`` (Telegram usernames have no ``@`` in APIs)."""
+    return (value or "").strip().lstrip("@").strip()
+
+
 # --------------------------------------------------------------------------- #
 # Settings
 # --------------------------------------------------------------------------- #
@@ -153,9 +183,15 @@ class Settings:
 
     # 1. Telegram -----------------------------------------------------------
     bot_token: str = ""
+    #: The owner (diagnostics only — the bot itself is open to everybody).
     owner_user_id: int = 0
+    #: ``@username`` of the owner, resolved to an id at startup so nobody has to hunt for
+    #: a numeric id.
+    owner_username: str = ""
     startup_notify_chat_id: int = 0
     telegram_api_base: str = ""
+    #: Telegram restricts the webhook secret token alphabet; see ``sanitize_webhook_secret``.
+    webhook_secret_was_fixed: bool = False
 
     # 2. Upload transport ---------------------------------------------------
     # MTProto is authorised with the *bot token*: api_id/api_hash identify the Telegram
@@ -163,7 +199,9 @@ class Settings:
     # session string, nothing to store.
     api_id: int = 0
     api_hash: str = ""
-    mt_connections: int = 4
+    #: Parallel connections per upload. More = faster on a good link (failures are retried
+    #: per part); 8 is Telegram's practical maximum and the default.
+    mt_connections: int = 8
     upload_transport: str = "auto"  # auto | bot | mtproto
 
     # 2b. Housekeeping ------------------------------------------------------
@@ -173,12 +211,21 @@ class Settings:
     #: Refuse to start a job when the workspace has less than this free. Disk is the
     #: host's constraint, so it is reported on its own terms — never as a file-size cap.
     min_free_disk_mb: int = 256
+    #: Seconds a user must wait between two links. Keeps a public bot fair and stops one
+    #: person from occupying the whole queue; 0 disables the check.
+    user_cooldown_seconds: int = 5
+    #: Start image and animated progress message instead of plain text.
+    rich_messages: bool = True
+    #: Where Telegram's file_ids for the bot's own images are cached. Defaults to a hidden
+    #: file in the download workspace; point it at a mounted volume to survive restarts.
+    asset_cache_path: str = ""
 
     # 3. Engine (TypeTube) --------------------------------------------------
     typetube_bin: str = "typetube"
     typetube_api_key: str = ""
     typetube_host: str = ""
-    typetube_workers: int = 8
+    #: 0 = auto (chosen from the CPU budget the host actually grants, see bot.utils.cpu_budget).
+    typetube_workers: int = 0
     typetube_chunk_mb: int = 10
     node_binary: str = "node"
 
@@ -197,6 +244,13 @@ class Settings:
 
     # 6. Web service --------------------------------------------------------
     webhook_url: str = ""
+    #: Where the URL came from: ``WEBHOOK_URL``, ``PUBLIC_URL`` or the platform's own
+    #: ``RENDER_EXTERNAL_URL``. Reported so a stale setting is visible in ``/diag``.
+    webhook_url_source: str = ""
+    #: The URL the hosting platform says the service is published at (Render exports one).
+    render_external_url: str = ""
+    #: A ``WEBHOOK_URL`` that disagrees with the platform's URL and was therefore ignored.
+    stale_webhook_url: str = ""
     webhook_path: str = "telegram"
     webhook_secret: str = ""
     listen_host: str = "0.0.0.0"
@@ -262,6 +316,11 @@ class Settings:
         return self.upload_capability_mb * MB
 
     @property
+    def resolved_asset_cache_path(self) -> Path:
+        """The file_id cache: ``ASSET_CACHE_PATH``, else a hidden file in the workspace."""
+        return Path(self.asset_cache_path) if self.asset_cache_path else self.download_dir / ".asset-cache.json"
+
+    @property
     def min_free_disk_bytes(self) -> int:
         return self.min_free_disk_mb * MB
 
@@ -305,25 +364,49 @@ class Settings:
                 os.environ.update(previous)
 
         ffmpeg_path = _tool("FFMPEG_BINARY", "ffmpeg")
+        raw_secret = _str("WEBHOOK_SECRET")
+        # Render exports the address it actually publishes the service at. A WEBHOOK_URL
+        # left over from an earlier name (this really happened: the service was renamed and
+        # the old host was kept) makes Telegram deliver updates to a host that no longer
+        # answers — the bot looks offline while logging perfect health. The platform's own
+        # URL is ground truth, so it wins; the operator is told about the disagreement.
+        explicit_url = _str("WEBHOOK_URL") or _str("PUBLIC_URL")
+        explicit_source = "WEBHOOK_URL" if _str("WEBHOOK_URL") else "PUBLIC_URL"
+        platform_url = _str("RENDER_EXTERNAL_URL")
+        webhook_url = explicit_url
+        webhook_source = explicit_source if explicit_url else ""
+        stale_url = ""
+        if platform_url and (not explicit_url or url_host(platform_url) != url_host(explicit_url)):
+            stale_url = explicit_url
+            webhook_url = platform_url
+            webhook_source = "RENDER_EXTERNAL_URL"
+
+        secret = sanitize_webhook_secret(raw_secret)
+        secret_was_fixed = bool(raw_secret) and secret != raw_secret
         return cls(
             # Telegram
             bot_token=_str("BOT_TOKEN"),
             owner_user_id=_int("OWNER_USER_ID", 0, minimum=0),
+            owner_username=normalize_username(_str("OWNER_USERNAME") or _str("OWNER")),
             startup_notify_chat_id=_int("STARTUP_NOTIFY_CHAT_ID", 0, minimum=0),
             telegram_api_base=_str("TELEGRAM_API_BASE").rstrip("/"),
             # Limits
             max_duration_minutes=_int("MAX_DURATION_MINUTES", 0, minimum=0),
             min_free_disk_mb=_int("MIN_FREE_DISK_MB", 256, minimum=0),
+            user_cooldown_seconds=_int("USER_COOLDOWN_SECONDS", 5, minimum=0, maximum=3600),
+            rich_messages=_bool("RICH_MESSAGES", True),
+            asset_cache_path=_str("ASSET_CACHE_PATH"),
             # MTProto, authorised with the bot token (both spellings are accepted)
             api_id=_int("TELEGRAM_API_ID", 0, minimum=0) or _int("API_ID", 0, minimum=0),
             api_hash=_str("TELEGRAM_API_HASH") or _str("API_HASH"),
-            mt_connections=_int("MT_CONNECTIONS", 4, minimum=1, maximum=8),
+            mt_connections=_int("MT_CONNECTIONS", 8, minimum=1, maximum=8),
             upload_transport=(_str("UPLOAD_TRANSPORT", "auto") or "auto").lower(),
             # Engine
             typetube_bin=_str("TYPETUBE_BIN", "typetube") or "typetube",
             typetube_api_key=_str("TYPETUBE_API_KEY"),
             typetube_host=_str("TYPETUBE_HOST"),
-            typetube_workers=_int("TYPETUBE_WORKERS", 8, minimum=1, maximum=32),
+            # 0 = decide from the CPU budget the host actually gives us (see bot.utils.cpu_budget).
+            typetube_workers=_int("TYPETUBE_WORKERS", 0, minimum=0, maximum=32),
             typetube_chunk_mb=_int("TYPETUBE_CHUNK_MB", 10, minimum=1, maximum=64),
             node_binary=_tool("NODE_BINARY", "node"),
             # Quality
@@ -337,9 +420,13 @@ class Settings:
             ffmpeg_path=ffmpeg_path,
             ffprobe_path=_resolve_ffprobe(ffmpeg_path),
             # Web service
-            webhook_url=_str("WEBHOOK_URL") or _str("PUBLIC_URL") or _str("RENDER_EXTERNAL_URL"),
+            webhook_url=webhook_url,
+            webhook_url_source=webhook_source,
+            render_external_url=platform_url,
+            stale_webhook_url=stale_url,
             webhook_path=_str("WEBHOOK_PATH", "telegram").strip("/") or "telegram",
-            webhook_secret=_str("WEBHOOK_SECRET"),
+            webhook_secret=secret,
+            webhook_secret_was_fixed=secret_was_fixed,
             listen_host=_str("LISTEN_HOST", "0.0.0.0"),
             port=_int("PORT", 8080, minimum=1, maximum=65535),
             use_polling=_bool("USE_POLLING", False),
@@ -405,6 +492,13 @@ class Settings:
                 f"login, and raises the ceiling to {self.mtproto_capability_mb} MB — see .env.example \u00a72."
             )
 
+        if self.stale_webhook_url and not self.use_polling:
+            notes.append(
+                f"WEBHOOK_URL is set to {self.stale_webhook_url}, but this service is published at "
+                f"{self.render_external_url}. Using the platform's address so Telegram can reach the "
+                "bot; update or delete WEBHOOK_URL to silence this."
+            )
+
         if self.upload_transport == "mtproto" and not self.mtproto_ready:
             notes.append("UPLOAD_TRANSPORT=mtproto was requested but TELEGRAM_API_ID/TELEGRAM_API_HASH are missing.")
 
@@ -414,10 +508,24 @@ class Settings:
                 "WEBHOOK_URL to its public https URL."
             )
 
-        if not self.owner_user_id:
+        if self.webhook_secret_was_fixed:
             notes.append(
-                "OWNER_USER_ID is not set: anyone who finds this bot can use it. Set it (send /id to the bot) to "
-                "keep the bot to yourself."
+                "WEBHOOK_SECRET contained characters Telegram does not accept and was cleaned up to "
+                f"\"{self.webhook_secret}\". Telegram only allows A-Z a-z 0-9 _ - (max 256), and registering a "
+                "webhook with anything else fails, which would leave the bot looking offline. Set a compliant "
+                "value yourself to silence this note."
+            )
+        if self.runs_webhook and not self.webhook_secret:
+            notes.append(
+                "WEBHOOK_SECRET is empty: the webhook endpoint accepts anyone who knows its URL. Set it to a "
+                "value made of A-Z a-z 0-9 _ - (up to 256 characters)."
+            )
+
+        if not self.owner_user_id and not self.owner_username:
+            notes.append(
+                "No owner configured (OWNER_USERNAME or OWNER_USER_ID): the bot is open to everyone — which is "
+                "the default — but nobody can use /diag. Set OWNER_USERNAME to your @username to get "
+                "owner-only diagnostics without hunting for a numeric id."
             )
 
         if not self.typetube_api_key:
@@ -431,6 +539,12 @@ class Settings:
 
         if self.transport == "mtproto" and self.mt_connections > 8:
             notes.append("MT_CONNECTIONS is capped at 8 by Telegram's client limits.")
+
+        if self.typetube_workers == 0:
+            notes.append(
+                "TYPETUBE_WORKERS is unset: the download worker count is chosen from the CPU budget the host "
+                "really gives this container. Set it (1-32) to override."
+            )
 
         if self.min_free_disk_mb < 128:
             notes.append(
@@ -458,14 +572,22 @@ class Settings:
             "engine": self.typetube_client,
             "typetube_key": "configured" if self.typetube_api_key else "none",
             "typetube_host": self.typetube_host or "cluster default",
-            "typetube_workers": self.typetube_workers,
             "ffmpeg": self.ffmpeg_path,
             "download_dir": str(self.download_dir),
             "mode": "webhook" if self.runs_webhook else "polling",
             "webhook": self.webhook_target if self.runs_webhook else "",
+            "webhook_source": self.webhook_url_source or "-",
+            "stale_webhook_url": self.stale_webhook_url,
             "port": self.port,
             "log_level": self.log_level,
             "owner_user_id": self.owner_user_id or "-",
+            "owner_username": self.owner_username or "-",
+            "public_bot": not (self.owner_user_id or self.owner_username),
+            "rich_messages": self.rich_messages,
+            "user_cooldown_seconds": self.user_cooldown_seconds,
+            "mt_connections": self.mt_connections,
+            "typetube_workers": self.typetube_workers or "auto",
+            "webhook_secret": "set" if self.webhook_secret else "none",
         }
 
 

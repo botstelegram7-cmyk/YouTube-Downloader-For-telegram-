@@ -12,6 +12,13 @@ audio track — delivered straight into the chat.
   no login code, no session string.
 * **Buttons that say something:** quality choices come from the video's real streams, are
   colour-coded (green = best, blue = alternatives, red = cancel) and are never invented.
+* **Fast by default:** parallel range workers sized from the container's own CPU budget
+  (`TYPETUBE_WORKERS=0` = automatic), a warmed MTProto uploader and one status message per
+  job instead of a stream of them.
+* **Made to be looked at:** `/start` answers with a real picture, and downloads run inside an
+  animated status card with live speed and ETA.
+* **Open to everyone:** anyone can download. The only restricted view is `/diag`, the
+  operator's diagnostics panel, which answers the owner and nobody else.
 
 ---
 
@@ -66,7 +73,8 @@ Minimum viable environment:
 |---|---|
 | `BOT_TOKEN` | from [@BotFather](https://t.me/BotFather) — the only required setting |
 | `WEBHOOK_URL` | your service's public https URL; omit to use long polling |
-| `OWNER_USER_ID` | keeps the bot to yourself (send `/id` to find it) |
+| `OWNER_USERNAME` | *optional* — the operator's `@username`; owner-only `/diag`, no fair-use cooldown |
+| `OWNER_USER_ID` | *optional* — the same owner as a numeric id (send `/id` to find it) |
 
 ## Large files, honestly
 
@@ -136,6 +144,7 @@ for a second account. This bot does not do that.
 | `/limits` | the real ceiling, and how to raise it |
 | `/id` | your chat id, for `OWNER_USER_ID` |
 | `/about` | version and engine |
+| `/diag` | **owner only** — host CPU budget, free disk, transports, cached tracks, assets |
 
 ## Configuration
 
@@ -144,16 +153,19 @@ Everything has a default; `.env.example` documents all of it. The ones people ac
 | Variable | Default | Notes |
 |---|---|---|
 | `BOT_TOKEN` | — | **required** |
-| `OWNER_USER_ID` | `0` | `0` leaves the bot open to anyone |
-| `WEBHOOK_URL` | *(empty)* | empty → long polling |
+| `OWNER_USERNAME` / `OWNER_USER_ID` | *(empty)* / `0` | the operator: `/diag`, the `/start` credit, cooldown-exempt. Everyone else can still download |
+| `USER_COOLDOWN_SECONDS` | `5` | fair-use pause between two links from one user; `0` disables |
+| `RICH_MESSAGES` | `true` | `/start` picture and animated progress cards |
+| `ASSET_CACHE_PATH` | *(empty)* | where Telegram's file ids are cached; defaults to `<DOWNLOAD_DIR>/.asset-cache.json` |
+| `WEBHOOK_URL` | *(empty)* | empty → long polling; on Render, `RENDER_EXTERNAL_URL` wins when the two disagree |
 | `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | — | [my.telegram.org](https://my.telegram.org); unlocks 2000 MB uploads over MTProto |
 | `UPLOAD_TRANSPORT` | `auto` | `auto`, `bot` (never use MTProto) or `mtproto` |
-| `MT_CONNECTIONS` | `4` | parallel connections per upload (max 8) |
+| `MT_CONNECTIONS` | `8` | parallel connections per upload (1–16) |
 | `MIN_FREE_DISK_MB` | `256` | disk headroom kept before a job starts |
 | `MAX_DURATION_MINUTES` | `0` | `0` = unlimited; refuses longer videos before downloading |
 | `DEFAULT_QUALITY` | `720p` | the quality highlighted in green; `best` for the maximum |
 | `TYPETUBE_API_KEY` | *(empty)* | lifts the cluster's quota and unlocks Hi-Fi audio |
-| `TYPETUBE_WORKERS` / `TYPETUBE_CHUNK_MB` | `8` / `10` | parallel range downloads |
+| `TYPETUBE_WORKERS` / `TYPETUBE_CHUNK_MB` | `0` / `10` | parallel range downloads; `0` = automatic (16 workers per CPU core, clamped to 8–32) |
 | `MAX_CONCURRENT_JOBS` | `2` | 1–2 on a 512 MB instance |
 | `DOWNLOAD_DIR` | `/tmp/ytbot-downloads` | temporary workspace, emptied per job |
 | `THUMBNAIL_MAX_SIDE` | `320` | Telegram's own limit |

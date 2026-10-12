@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import os
 import re
 import shutil
 import tempfile
@@ -123,3 +124,56 @@ def parse_quality_label(label: str) -> int | None:
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+# --------------------------------------------------------------------------- #
+# Host budget
+# --------------------------------------------------------------------------- #
+def cpu_budget() -> float:
+    """How many CPUs this container may actually use — not how many the host has.
+
+    ``os.cpu_count()`` reports the *machine's* cores, which is exactly the wrong number
+    inside a container: a Render free instance sees dozens of cores and is allowed 0.1 of
+    one. The cgroup limits are the honest answer, and they decide how many parallel range
+    workers make sense.
+    """
+    # cgroup v2: "max" or "<quota> <period>"
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            return max(0.1, int(quota) / int(period))
+    except (OSError, ValueError):
+        pass
+
+    # cgroup v1: quota -1 means "unlimited"
+    try:
+        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text().strip())
+        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text().strip())
+        if quota > 0 and period > 0:
+            return max(0.1, quota / period)
+    except (OSError, ValueError):
+        pass
+
+    return float(os.cpu_count() or 1)
+
+
+def auto_workers(budget: float | None = None, *, low: int = 8, high: int = 32) -> int:
+    """Parallel range workers for the download engine.
+
+    Range downloads are latency-bound, so a handful of workers help even on a throttled
+    container; a real core earns more. The engine clamps to 1-32 itself.
+    """
+    cpus = cpu_budget() if budget is None else budget
+    return int(clamp(round(cpus * 16), low, high))
+
+
+def budget_note(budget: float | None = None) -> str:
+    """A one-line description of the host's CPU budget, for logs and ``/diag``."""
+    cpus = cpu_budget() if budget is None else budget
+    cores = f"{cpus:.2f}".rstrip("0").rstrip(".")
+    if cpus < 1:
+        return (
+            f"{cores} CPU — a throttled container. Downloads and muxing are CPU-bound here, so expect "
+            "slow throughput: a paid instance or a VPS is the fix, not a setting."
+        )
+    return f"{cores} CPU — {auto_workers(cpus)} download workers, {cpus:.0f}× parallel work."
