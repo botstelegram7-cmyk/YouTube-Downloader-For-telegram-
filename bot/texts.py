@@ -17,7 +17,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("cancel", "Stop your download, conversion and upload"),
     ("limits", "Why files are capped and how to raise the cap"),
     ("id", "Show your chat id (for OWNER_USER_ID)"),
-    ("about", "Version, engine and credits"),
+    ("about", "What this bot can do, and its version"),
 )
 
 #: Only the operator ever sees this one in the menu.
@@ -118,18 +118,20 @@ def help_text() -> str:
     )
 
 
-def about_text(version: str, engine: str = "TypeTube") -> str:
+def about_text(version: str) -> str:
+    """``/about`` — what this bot does, in the user's terms. No stack, no engine names."""
     return (
         "ℹ️ <b>About</b>\n"
         "\n"
         f"<b>Version</b>: {esc(version)}\n"
-        f"<b>Engine</b>: {esc(engine)}\n"
-        "<b>Fetcher</b>: aria2 — torrents, magnets and direct links\n"
-        "<b>Delivery</b>: FFmpeg mux, faststart, thumbnail, streaming video\n"
-        "<b>Built with</b>: python-telegram-bot, TypeTube, FFmpeg, aria2\n"
+        "<b>Takes</b>: YouTube links · <code>magnet:</code> and <code>.torrent</code> "
+        "links · direct file URLs\n"
+        "<b>Gives</b>: the quality you picked, playable video with a thumbnail, or the "
+        "file exactly as the server sent it\n"
+        "<b>Torrents</b>: only the file you tap is downloaded, and nothing is seeded "
+        "afterwards\n"
         "\n"
-        "<i>Only download what you own or are allowed to save. Torrents are fetched on "
-        "demand and never seeded afterwards.</i>"
+        "<i>Only download what you own or are allowed to save.</i>"
     )
 
 
@@ -147,7 +149,7 @@ def startup_report(version: str, summary: dict, warnings: list[str]) -> str:
         "🚀 <b>Bot online</b>",
         f"<i>v{esc(version)}</i>",
         "",
-        f"<b>Engine</b>: {esc(str(summary.get('engine')))}",
+        "<b>Sources</b>: YouTube · torrent · direct link",
         f"<b>Telegram API</b>: {esc(str(summary.get('api_mode')))}",
         f"<b>Upload</b>: up to {summary.get('upload_capability_mb')} MB per file"
         f" · {esc(str(summary.get('upload_transport')))}",
@@ -193,7 +195,7 @@ def owner_only(action: str = "/diag") -> str:
 
 
 def analyzing(url: str) -> str:
-    return "🔍 <b>Reading the link…</b>\n<i>Resolving streams with TypeTube.</i>"
+    return "🔍 <b>Reading the link…</b>\n<i>Checking what that link has to offer.</i>"
 
 
 def analyzing_torrent(label: str) -> str:
@@ -352,11 +354,11 @@ def replaced_previous(title: str) -> str:
 
 def not_youtube(host: str) -> str:
     return (
-        "🤔 <b>That link is not from YouTube</b>\n"
+        "🤔 <b>I do not recognise that link</b>\n"
         f"<i>{esc(host)}</i>\n\n"
-        "This bot downloads with the TypeTube engine, which serves YouTube only.\n"
         "Send a <code>youtube.com</code>, <code>youtu.be</code>, <code>/shorts</code> or "
-        "<code>/live</code> link."
+        "<code>/live</code> link, a <code>magnet:</code> or <code>.torrent</code> link, "
+        "or a direct URL to a file."
     )
 
 
@@ -385,7 +387,7 @@ def resolve_failed(url: str, reason: str) -> str:
         f"<i>{esc(reason)}</i>\n\n"
         "• Check that the video plays in a browser\n"
         "• Private, age-restricted or region-locked videos cannot be resolved\n"
-        "• If it keeps failing, the TypeTube cluster may be busy — try again in a minute"
+        "• If it keeps failing, the video service may be busy — try again in a minute"
     )
 
 
@@ -418,8 +420,8 @@ def limits_text(summary: dict) -> str:
         "📦 <b>Size limits</b>",
         "",
         "<b>1 · Downloading — not limited by this bot</b>",
-        "The TypeTube engine streams the whole video: 4K, hours long, any size it offers. "
-        "Nothing in this application caps the download.",
+        "The whole video is streamed straight from the source: 4K, hours long, any size it "
+        "offers. Nothing in this application caps the download.",
         "",
         "<b>2 · Uploading — Telegram decides</b>",
         f"Transport: {esc(_transport_label(summary))}",
@@ -536,7 +538,7 @@ def status_text(summary: dict, active: list[str], free_disk: str) -> str:
     lines = [
         "📊 <b>Status</b>",
         "",
-        f"<b>Engine</b>: {esc(str(summary.get('engine')))}",
+        "<b>Sources</b>: YouTube · torrent · direct link",
         f"<b>Upload</b>: up to {summary.get('upload_capability_mb')} MB per file"
         f" · {esc(str(summary.get('upload_transport')))}",
         f"<b>Parallel jobs</b>: {summary.get('max_concurrent_jobs')}",

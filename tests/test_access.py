@@ -17,7 +17,24 @@ from telegram.error import TelegramError
 from bot.access import Access
 from bot.assets import DOWNLOAD_ANIMATION, START_IMAGE, AssetLibrary
 from bot.progress import ProgressCard
-from bot.texts import diagnostics, owner_only, welcome
+from bot.texts import (
+    about_text,
+    analyzing,
+    analyzing_link,
+    analyzing_torrent,
+    cancelled,
+    diagnostics,
+    help_text,
+    limits_text,
+    link_refused,
+    no_streams,
+    not_supported,
+    not_youtube,
+    owner_only,
+    resolve_failed,
+    status_text,
+    welcome,
+)
 from config import load_settings, sanitize_webhook_secret
 
 TOKEN = "123456789:" + "A" * 35
@@ -254,6 +271,46 @@ def test_the_welcome_says_nothing_about_engines_limits_commands_or_owners():
     for banned in ("TypeTube", "FFmpeg", "MB per file", "/diag", "OWNER", "Commands"):
         assert banned not in plain, f"/start must not mention {banned!r}"
     assert len(plain) < 500
+
+
+def test_no_public_screen_names_the_stack():
+    """The operator: "Don't introduce introduction-of-about code like which engine used".
+
+    Every screen a stranger can open must describe what the bot *does*. /diag is the one
+    exception — it is owner-only and exists to expose exactly these internals.
+    """
+    # MTProto is deliberately absent: it is Telegram's own transport, not this bot's stack,
+    # and /limits has to name it to explain where the ceiling comes from and how to raise it.
+    stack = ("TypeTube", "typetube", "aria2", "FFmpeg", "ffmpeg", "yt-dlp", "Pyrogram",
+             "pyrogram", "python-telegram-bot", "tgcrypto")
+    public = {
+        "welcome": welcome("YouTube Downloader", "3.3.3"),
+        "help": help_text(),
+        "about": about_text("3.3.3"),
+        "limits": limits_text({"upload_capability_mb": 2000, "upload_transport": "mtproto",
+                               "mtproto": "ready", "bot_api_upload_mb": 50}),
+        "status": status_text({"upload_capability_mb": 2000, "upload_transport": "mtproto",
+                               "max_concurrent_jobs": 2, "mode": "polling"}, [], "40 GB"),
+        "not_youtube": not_youtube("vimeo.com"),
+        "resolve_failed": resolve_failed("https://youtu.be/x", "boom"),
+        "not_supported": not_supported("hello there"),
+        "link_refused": link_refused("that address is private"),
+        "analyzing": analyzing("https://youtu.be/x"),
+        "analyzing_torrent": analyzing_torrent("Some.Release.2024"),
+        "analyzing_link": analyzing_link("example.com"),
+        "no_streams": no_streams(),
+        "cancelled": cancelled(),
+    }
+    for name, text in public.items():
+        for banned in stack:
+            assert banned not in text, f"{name} must not name {banned!r}"
+
+
+def test_the_diagnostics_panel_may_name_the_stack_because_it_is_owner_only():
+    facts = {"engine": "typetube", "engine_version": "1.1.4", "aria2": "/usr/bin/aria2c",
+             "ffmpeg": "7.0.2", "mtproto": "ready"}
+    text = diagnostics(facts, {}, {})
+    assert "typetube" in text and "aria2c" in text
 
 
 def test_the_start_screen_advertises_every_source_it_accepts():
