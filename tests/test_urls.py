@@ -1,84 +1,69 @@
-"""Link extraction, cleaning and the private-network guard."""
+"""Link handling: YouTube only, canonicalised, with an honest refusal otherwise.
+
+The engine treats anything it does not recognise as a *search query*, so a stray Vimeo
+link would quietly download an unrelated video. These tests pin that down.
+"""
 
 from __future__ import annotations
 
-from bot.urls import check_url_safety, clean_url, extract_url, ip_is_public, looks_like_url
+from bot.urls import CANONICAL, canonise, extract_url, youtube_link
+
+VIDEO = "dQw4w9WgXcQ"
+WATCH = f"https://www.youtube.com/watch?v={VIDEO}"
 
 
-def test_extracts_a_url_from_a_sentence():
-    assert extract_url("look at https://youtu.be/dQw4w9WgXcQ please") == "https://youtu.be/dQw4w9WgXcQ"
+def test_extracts_a_url_from_a_sentence_and_trims_punctuation():
+    assert extract_url(f"look at https://youtu.be/{VIDEO} please") == f"https://youtu.be/{VIDEO}"
+    assert extract_url(f"(see {WATCH}).") == WATCH
     assert extract_url("no link here") is None
     assert extract_url("") is None
 
 
-def test_strips_trailing_punctuation():
-    assert extract_url("(see https://example.com/video).") == "https://example.com/video"
+def test_every_youtube_url_shape_becomes_one_canonical_watch_url():
+    for url in (
+        WATCH,
+        f"https://youtu.be/{VIDEO}",
+        f"https://www.youtube.com/shorts/{VIDEO}",
+        f"https://youtube.com/live/{VIDEO}",
+        f"https://www.youtube.com/embed/{VIDEO}",
+        f"https://m.youtube.com/watch?v={VIDEO}",
+        f"https://music.youtube.com/watch?v={VIDEO}&feature=share",
+    ):
+        assert canonise(url) == CANONICAL.format(id=VIDEO), url
 
 
-def test_removes_tracking_parameters_only():
-    url = "https://www.youtube.com/watch?v=abc123&si=tracking&feature=share&t=42"
-    cleaned = clean_url(url)
-    assert "si=" not in cleaned
-    assert "feature=" not in cleaned
-    assert "v=abc123" in cleaned
-    assert "t=42" in cleaned
+def test_tracking_parameters_and_playlists_do_not_change_the_target():
+    messy = f"https://www.youtube.com/watch?v={VIDEO}&list=PLabc&index=4&si=tracking&t=42"
+    assert canonise(messy) == CANONICAL.format(id=VIDEO)
 
 
-def test_looks_like_url():
-    assert looks_like_url("https://example.com") is True
-    assert looks_like_url("hello") is False
+def test_a_bare_video_id_is_accepted():
+    url, reason = youtube_link(VIDEO)
+    assert url == CANONICAL.format(id=VIDEO)
+    assert reason == ""
 
 
-def test_ip_is_public_knows_the_private_ranges():
-    assert ip_is_public("8.8.8.8") is True
-    assert ip_is_public("1.1.1.1") is True
-    assert ip_is_public("127.0.0.1") is False
-    assert ip_is_public("10.0.0.5") is False
-    assert ip_is_public("192.168.1.10") is False
-    assert ip_is_public("172.16.5.5") is False
-    assert ip_is_public("169.254.169.254") is False  # cloud metadata
-    assert ip_is_public("::1") is False
-    assert ip_is_public("not-an-ip") is False
+def test_ids_of_the_wrong_length_are_not_mistaken_for_links():
+    assert youtube_link("dQw4w9WgXc")[0] is None
+    assert youtube_link("dQw4w9WgXcQx")[0] is None
 
 
-def test_public_hosts_are_allowed():
-    allowed, reason = check_url_safety("https://example.com/video", resolver=lambda host: ["93.184.216.34"])
-    assert allowed is True and reason == ""
+def test_other_sites_are_refused_with_the_host_in_the_reason():
+    for text, host in (
+        ("https://vimeo.com/12345", "vimeo.com"),
+        ("https://www.dailymotion.com/video/x123", "dailymotion.com"),
+        ("http://169.254.169.254/latest/meta-data/", "169.254.169.254"),
+    ):
+        url, reason = youtube_link(text)
+        assert url is None, text
+        assert host in reason, reason
 
 
-def test_loopback_and_private_hostnames_are_blocked():
-    for url in ("http://127.0.0.1:8000/x", "http://169.254.169.254/latest/meta-data/", "http://localhost/x"):
-        allowed, reason = check_url_safety(url, resolver=lambda host: ["10.0.0.1"])
-        assert allowed is False, url
-        assert reason
+def test_a_youtube_link_without_a_video_id_is_refused():
+    url, reason = youtube_link("https://www.youtube.com/playlist?list=PLabc")
+    assert url is None
+    assert reason  # it is a YouTube host, but there is no video in it
 
 
-def test_a_hostname_resolving_into_a_private_network_is_blocked():
-    allowed, reason = check_url_safety("https://internal.example/secret", resolver=lambda host: ["192.168.0.9"])
-    assert allowed is False
-    assert "private network" in reason
-
-
-def test_non_http_schemes_are_refused():
-    for url in ("ftp://example.com/file", "file:///etc/passwd", "javascript:alert(1)"):
-        allowed, _ = check_url_safety(url, resolver=lambda host: ["93.184.216.34"])
-        assert allowed is False, url
-
-
-def test_unresolvable_hosts_are_reported():
-    allowed, reason = check_url_safety("https://does-not-exist.example/x", resolver=lambda host: [])
-    assert allowed is False
-    assert "resolve" in reason
-
-
-def test_overlong_urls_are_refused():
-    allowed, _ = check_url_safety("https://example.com/" + "x" * 3000, resolver=lambda host: ["93.184.216.34"])
-    assert allowed is False
-
-
-def test_private_urls_can_be_allowed_for_local_testing():
-    """The end-to-end harness serves its fixture on 127.0.0.1."""
-    blocked, _ = check_url_safety("http://127.0.0.1:8092/clip.mp4", allow_private=False)
-    allowed, reason = check_url_safety("http://127.0.0.1:8092/clip.mp4", allow_private=True)
-    assert blocked is False
-    assert allowed is True and reason == ""
+def test_plain_text_is_not_reported_as_a_bad_link():
+    assert youtube_link("hello there") == (None, "")

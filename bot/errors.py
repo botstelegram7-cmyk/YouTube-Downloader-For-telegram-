@@ -41,6 +41,10 @@ class UploadError(BotError):
     reason = "The upload to Telegram failed."
 
 
+class UploadCancelled(BotError):
+    reason = "Cancelled during upload."
+
+
 class TooLargeError(BotError):
     """Raised when the produced file cannot be sent through the current Bot API."""
 

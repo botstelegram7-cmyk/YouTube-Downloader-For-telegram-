@@ -31,7 +31,7 @@ A Python web service has no such constraint, so both halves were merged. What th
   three places where a mismatch could break every download.
 * **One place where a job lives.** The previous design had to reconcile "the worker thinks
   this job is running" with "the platform thinks this invocation is still alive".
-* **Real cancellation.** Killing yt-dlp/FFmpeg is a local `SIGTERM` to a registered child
+* **Real cancellation.** Killing the TypeTube CLI/FFmpeg is a local `SIGTERM` to a registered child
   process instead of a request to another service that might itself have died.
 * **One artifact to deploy.** `Dockerfile` at the root, `python main.py`, done.
 
@@ -58,10 +58,12 @@ main.py ─ CLI and entry point
 | `bot/web.py` | The aiohttp app: `/` service card, `/health` + `/healthz` (503 without FFmpeg), `/stats` job snapshot, `POST /<WEBHOOK_PATH>` (secret check, 2 MB payload cap, `Update.de_json`, queue put, immediate 200). | probe, jobs |
 | `bot/handlers/` | Thin adapters. `commands.py` (`/start /help /status /cancel /limits /id /about`), `links.py` (URL extraction → probe → keyboard), `callbacks.py` (`dl:`/`cancel:`/`abort:`), `errors.py` (last-resort handler + `RetryAfter`/`Forbidden` handling). | everything below |
 | `bot/jobs.py` | `Job` + `JobManager`: one job per user, auto-cancel, `Semaphore` queue, the download→mux→thumbnail→upload pipeline, progress rendering, cleanup, counters. | download, upload, progress |
-| `bot/download.py` | yt-dlp: option building, format selection, progress hooks, cancellation through `ProcessRegistry`, `DownloadResult` with metadata from the **local file**. | probe, ffmpeg, process |
+| `bot/download.py` | Download → verify → faststart → thumbnail → size guard: drives the engine, then proves the result with ffprobe. | typetube, ffmpeg, process |
 | `bot/upload.py` | `sendVideo`/`sendAudio`/`sendDocument`: caption, thumbnail, `supports_streaming`, dimension/duration metadata, byte-accurate upload progress, container-refusal fallback. | progress |
 | `bot/ffmpeg.py` | ffprobe wrapper, `+faststart` detection and remux, thumbnail generation, audio conversion, version reporting. | process |
-| `bot/probe.py` | Link inspection without downloading: yt-dlp info extraction, ffprobe inspection for direct media URLs, `MediaInfo`, `ProbeCache` (8-char tokens in `callback_data`). | — |
+| `bot/typetube.py` | The engine: `resolve --json`, streamed and cancellable downloads, progress parsing, `Track`/`Stream`, `TrackCache` (8-char tokens in `callback_data`). | process |
+| `bot/mtproto.py` | The Pyrofork user session that carries uploads above the Bot API ceiling. | upload |
+| `bot/urls.py` | Link extraction, YouTube-only validation and canonicalisation. | — |
 | `bot/qualities.py` | Turns a probed `info` dict into the quality buttons: which heights exist, size estimates (`≈` when derived from bitrate), format selectors. Pure functions — heavily unit-tested. | — |
 | `bot/progress.py` | `StatusReporter`: throttled, idempotent status edits with a live cancel button; `UploadProgressFile`: a file wrapper that counts uploaded bytes. | — |
 | `bot/process.py` | `ProcessRegistry`: spawns children with pipes, streams output, terminates them (SIGTERM → grace → SIGKILL). The only place that touches subprocesses. | — |
@@ -83,7 +85,7 @@ to run with no token, no network and no FFmpeg.
                             • urls.extract() — pull the URL out of the message
                             • urls.check_url_safety_async() — SSRF guard (DNS checked too)
                             • reply "🔍 Analysing…" immediately, then work in a tracked task
-③ probe                   probe.probe() — yt-dlp in a worker thread (45 s limit)
+③ resolve                 typetube.resolve() — the CLI's `--json` (45 s limit)
                             • direct media URL (no geometry) → ffprobe reads the remote file
                             • result → ProbeCache.put() → 8-char token for this user
 ④ quality keyboard        qualities.build_options() → only heights the source really has,
@@ -150,7 +152,7 @@ edits it.
 
 * **Throttled.** Edits are at most one per `PROGRESS_INTERVAL` (default 2 s). Telegram
   rate-limits message edits and does not care that a download moved from 43 % to 44 %.
-* **Thread-safe.** yt-dlp runs in a worker thread, so its hooks call
+* **Thread-safe.** The CLI streams its output on a reader task, so progress callbacks call
   `update_from_thread()`, which hops back to the event loop with `call_soon_threadsafe`.
 * **Idempotent finish.** `finish()` writes the final text once; later calls are no-ops.
   Without this, a cancel racing the last progress update could overwrite the outcome.
@@ -175,7 +177,7 @@ Three layers, in order of how fast they bite:
 2. **Asyncio.** The job task is cancelled, ending awaits (including `wait_for` wrappers
    around the download, which run in a thread).
 3. **Process.** `ProcessRegistry.terminate_all()` sends `SIGTERM` to every live child
-   (yt-dlp, FFmpeg, ffprobe), waits a grace period, then `SIGKILL`s survivors.
+   (the TypeTube CLI, FFmpeg, ffprobe), waits a grace period, then `SIGKILL`s survivors.
 
 Because the download runs through the same registry, `/cancel` stops a download that is
 mid-write, not just a job that happens to be between phases. On shutdown,
@@ -211,7 +213,7 @@ about that before deploying a public one.
 refuses bodies over 2 MB (413). Responses are always immediate: the update is queued, not
 processed inside the request.
 
-**SSRF.** URLs are validated before they reach yt-dlp: only `http(s)`, no blocked hostnames,
+**Link validation.** URLs are checked before they reach the engine: only YouTube hosts,
 and the **resolved** addresses are checked, so a hostname that resolves to `169.254.169.254`
 (cloud metadata), `127.0.0.1` or a private range is rejected. `ALLOW_PRIVATE_URLS=true`
 disables that guard for local testing — it is a deliberate hole.
@@ -238,7 +240,7 @@ message history.
 |---|---|
 | Bad link / unsupported site | Friendly message with the reason and the three usual causes; no job is created. |
 | Slow or hanging probe | 45 s limit (`INSPECT_TIMEOUT`), then "could not read that link" with the reason. |
-| Download error | yt-dlp's message is passed through and cleaned; the job ends, temp files are removed, the retry keyboard offers smaller qualities. |
+| Download error | The engine's `[Error]` line is cleaned up and passed through; the job ends, temp files are removed, the retry keyboard offers smaller qualities. |
 | Download hangs | `DOWNLOAD_TIMEOUT_SECONDS` (default 3600) ends it. |
 | Too large | Refused **before** downloading, from the size estimate, with the real ceiling named. |
 | Telegram rate-limits the upload | `RetryAfter` is honoured and reported in the status message. |

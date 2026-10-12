@@ -27,10 +27,17 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
           pip install -r requirements-dev.txt ruff
+          # The download engine, exactly as the Docker image installs it.
+          npm install -g typetube@1.1.4
+          node --version && typetube --version || true
 
       - name: Lint
         run: ruff check .
@@ -48,7 +55,7 @@ jobs:
           MAX_UPLOAD_MB: '50'
         run: python main.py --check
 
-      - name: End-to-end pipeline (mock Bot API, real yt-dlp + FFmpeg)
+      - name: End-to-end pipeline (mock Bot API, stubbed engine, real FFmpeg)
         run: python scripts/e2e_local.py
 
   docker:
@@ -60,7 +67,7 @@ jobs:
       - name: Build the image
         run: docker build -t ytbot-test .
 
-      - name: Validate the image (config, FFmpeg, yt-dlp)
+      - name: Validate the image (config, FFmpeg, Node, TypeTube)
         run: |
           docker run --rm \
             -e BOT_TOKEN=123456789:placeholder-token-used-only-by-ci \
@@ -68,7 +75,7 @@ jobs:
             -e MAX_UPLOAD_MB=50 \
             ytbot-test python main.py --check
 
-      - name: End-to-end check inside the image (FFmpeg, yt-dlp, webhook, /health)
+      - name: End-to-end check inside the image (FFmpeg, webhook, /health)
         run: |
           docker run --rm \
             -v "$PWD/scripts:/opt/scripts:ro" \
@@ -101,12 +108,23 @@ jobs:
             exit 1
           fi
 
-      - name: Fail if the serverless or Node side comes back
-        # 3.0.0 removed the Serverless handlers and the Node worker on purpose;
-        # a stray package.json or tgcloud/ directory would resurrect that design.
+      - name: Fail if the serverless or Node-side JavaScript comes back
+        # 3.0.0 removed the Serverless handlers and the Node worker on purpose. Node is
+        # now an image dependency (it runs the TypeTube CLI), but no JavaScript source,
+        # package manifest or vendored module belongs in this repository.
         run: |
-          if git ls-files | grep -E '(^|/)tgcloud/|(^|/)worker/|(^|/)node_modules/|(^|/)package(-lock)?\.json$|\.mjs$|tgcloud\.jsonc$|\.node-version$'; then
-            echo "::error::Serverless/Node artifacts are back in the repository"
+          if git ls-files | grep -E '(^|/)tgcloud/|(^|/)worker/|(^|/)node_modules/|(^|/)package(-lock)?\.json$|tgcloud\.jsonc$|\.node-version$'; then
+            echo "::error::The old Serverless/Node-side design is back in the repository"
+            exit 1
+          fi
+
+      - name: Fail if yt-dlp comes back
+        # The engine is TypeTube; a stray yt-dlp import or pin would silently revive
+        # the old downloader and split the codebase in two.
+        run: |
+          if git ls-files -z '*.py' '*.txt' '*.yml' '*.toml' 'Dockerfile' \
+             | xargs -0 grep -InE '(^|[^a-zA-Z_-])(yt_dlp|yt-dlp)([^a-zA-Z_-]|$)' 2>/dev/null; then
+            echo "::error::yt-dlp is referenced again — the download engine is TypeTube"
             exit 1
           fi
 

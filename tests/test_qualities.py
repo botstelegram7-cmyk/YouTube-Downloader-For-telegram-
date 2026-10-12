@@ -1,190 +1,172 @@
-"""Quality options must describe what a link really offers — nothing more."""
+"""Quality options must describe what a video really offers — nothing more.
+
+Streams come from TypeTube's metadata, so the picker shows the real heights, prefers the
+codecs Telegram can actually play, and never invents a size for a video stream (TypeTube
+does not report one).
+"""
 
 from __future__ import annotations
 
-import pytest
-
 from bot.qualities import (
-    audio_selector,
-    available_heights,
+    MAX_VIDEO_OPTIONS,
     build_options,
-    estimate_size,
+    default_option,
     find_option,
-    sort_options,
-    video_selector,
+    smaller_video_options,
+    video_heights,
 )
-from config import Settings, load_settings
+from bot.typetube import Stream, Track
+from config import load_settings
 
 SETTINGS = load_settings({"BOT_TOKEN": "123456789:" + "A" * 35})
 
-#: A link with 360p progressive, 720p/1080p video-only, M4A and Opus audio.
-INFO = {
-    "title": "Test video",
-    "duration": 100,
-    "uploader": "Test channel",
-    "formats": [
-        {
-            "format_id": "18",
-            "ext": "mp4",
-            "vcodec": "avc1",
-            "acodec": "aac",
-            "height": 360,
-            "tbr": 500,
-            "filesize": 6_000_000,
-        },
-        {
-            "format_id": "136",
-            "ext": "mp4",
-            "vcodec": "avc1",
-            "acodec": "none",
-            "height": 720,
-            "tbr": 1500,
-            "filesize": 18_000_000,
-        },
-        {
-            "format_id": "137",
-            "ext": "mp4",
-            "vcodec": "avc1",
-            "acodec": "none",
-            "height": 1080,
-            "tbr": 2400,
-            "filesize": 30_000_000,
-        },
-        {"format_id": "140", "ext": "m4a", "vcodec": "none", "acodec": "mp4a", "abr": 128, "filesize": 1_600_000},
-        {"format_id": "251", "ext": "webm", "vcodec": "none", "acodec": "opus", "abr": 160, "filesize": 2_000_000},
-    ],
-}
+M4A = 'audio/mp4; codecs="mp4a.40.2"'
+AVC = 'video/mp4; codecs="avc1.4d401f"'
+VP9 = 'video/webm; codecs="vp9"'
 
 
-def test_only_heights_the_link_has_are_offered():
-    options = build_options(INFO, SETTINGS)
-    keys = {option.key for option in options}
-    assert keys == {"360p", "720p", "1080p", "best", "audio"}
-    # 144p, 240p, 480p, 1440p and 2160p are on the ladder but not in the source.
-    for missing in ("144p", "240p", "480p", "1440p", "2160p"):
-        assert missing not in keys
-
-
-def test_available_heights_are_deduplicated_and_sorted():
-    assert available_heights(INFO) == [360, 720, 1080]
-
-
-def test_labels_carry_a_size_estimate():
-    options = {option.key: option for option in build_options(INFO, SETTINGS)}
-    assert "MB" in options["720p"].label
-    assert options["720p"].label.startswith("720p")
-    assert "1080p" in options["best"].label
-    assert options["audio"].label.startswith("Audio · M4A")
-
-
-def test_video_sizes_add_the_audio_track():
-    size_720, _ = estimate_size(INFO, height=720, settings=SETTINGS)
-    size_1080, _ = estimate_size(INFO, height=1080, settings=SETTINGS)
-    assert size_720 == 18_000_000 + 1_600_000
-    assert size_1080 == 30_000_000 + 1_600_000
-
-
-def test_progressive_formats_are_not_double_counted():
-    info = {
-        "duration": 100,
-        "formats": [{"ext": "mp4", "vcodec": "avc1", "acodec": "aac", "height": 360, "filesize": 5_000_000}],
-    }
-    size, _ = estimate_size(info, height=360, settings=SETTINGS)
-    assert size == 5_000_000
-
-
-def test_size_falls_back_to_bitrate_times_duration():
-    info = {
-        "duration": 200,
-        "formats": [{"ext": "mp4", "vcodec": "avc1", "acodec": "none", "height": 480, "tbr": 2000}],
-    }
-    size, estimated = estimate_size(info, height=480, settings=SETTINGS)
-    assert estimated is True
-    assert size == pytest.approx(2000 * 1000 / 8 * 200, rel=0.01)
-
-
-def test_audio_only_links_offer_audio_but_no_video():
-    info = {
-        "title": "Song",
-        "duration": 200,
-        "formats": [{"ext": "m4a", "vcodec": "none", "acodec": "mp4a", "abr": 128, "filesize": 3_200_000}],
-    }
-    options = build_options(info, SETTINGS)
-    keys = {option.key for option in options}
-    assert keys == {"audio"}
-    assert "MB" in find_option(options, "audio").label
-
-
-def test_progressive_only_links_offer_no_best_duplicate_of_a_missing_height():
-    info = {
-        "duration": 30,
-        "formats": [{"ext": "mp4", "vcodec": "avc1", "acodec": "aac", "height": 240, "filesize": 900_000}],
-    }
-    keys = {option.key for option in build_options(info, SETTINGS)}
-    # 240p is offered because the source has it; nothing above it is.
-    assert "240p" in keys
-    assert not any(key.endswith("p") and key not in ("240p",) for key in keys)
-
-
-def test_format_selectors_request_the_right_ceiling():
-    assert "height<=720" in video_selector(720, settings=SETTINGS)
-    assert "height<=720" not in video_selector(None, settings=SETTINGS)
-    assert video_selector(None, settings=SETTINGS).startswith("bestvideo+bestaudio")
-    assert audio_selector(SETTINGS).startswith("bestaudio")
-    mp3_settings = Settings(**{**SETTINGS.__dict__, "audio_format": "mp3"})
-    assert audio_selector(mp3_settings) == "bestaudio[ext=m4a]/bestaudio/best" or "bestaudio" in audio_selector(
-        mp3_settings
+def stream(itag: int, height: int | None, mime: str = AVC, bitrate: int = 0) -> Stream:
+    return Stream(
+        itag=itag,
+        quality=f"{height}p" if height else "",
+        mime=mime,
+        url="https://example.invalid/stream",
+        resolution=f"1920x{height}" if height else "",
+        bitrate=bitrate,
     )
 
 
-def test_option_sort_order_puts_audio_last_and_best_before_it():
-    ordered = sort_options(build_options(INFO, SETTINGS))
-    keys = [option.key for option in ordered]
-    assert keys[-1] == "audio"
-    assert keys[-2] == "best"
-    assert keys[:3] == ["360p", "720p", "1080p"]
+def track(*, heights=(360, 720, 1080), audio_bitrate=128_000, duration=100.0, safe=True) -> Track:
+    mime = AVC if safe else VP9
+    videos = tuple(stream(100 + index, height, mime) for index, height in enumerate(heights))
+    audio = (Stream(itag=140, quality="130kbps AAC", mime=M4A, url="u", resolution="", bitrate=audio_bitrate),)
+    return Track(
+        id="x",
+        title="Test video",
+        author="Test channel",
+        duration=duration,
+        thumbnail="",
+        video_streams=videos,
+        audio_streams=audio if audio_bitrate else (),
+        latency_ms=100,
+        raw={},
+        url="https://www.youtube.com/watch?v=abcdefghijk",
+    )
 
 
-def test_find_option_returns_none_for_unknown_keys():
-    options = build_options(INFO, SETTINGS)
+def keys(options) -> set[str]:
+    return {option.key for option in options}
+
+
+def test_only_the_heights_the_video_has_are_offered():
+    options = build_options(track(), SETTINGS)
+    assert keys(options) == {"best", "720p", "360p", "audio"}
+    for missing in ("144p", "240p", "480p", "1440p", "2160p"):
+        assert missing not in keys(options)
+
+
+def test_best_is_the_highest_real_height_and_targets_it():
+    options = build_options(track(), SETTINGS)
+    best = find_option(options, "best")
+    assert best.height == 1080
+    assert best.target == "1080p"
+    assert "1080" in best.label
+
+
+def test_heights_are_deduplicated_and_sorted():
+    assert video_heights(track(heights=(240, 240, 1080, 720))) == [240, 720, 1080]
+
+
+def test_streams_telegram_cannot_play_are_not_offered_when_h264_exists():
+    """A VP9-only height would produce a file Telegram often will not play."""
+    mixed = Track(
+        id="x",
+        title="t",
+        author="",
+        duration=10,
+        thumbnail="",
+        video_streams=(stream(18, 360, AVC), stream(248, 1080, VP9)),
+        audio_streams=(),
+        latency_ms=0,
+        raw={},
+        url="u",
+    )
+    assert video_heights(mixed) == [360]
+
+
+def test_vp9_is_used_when_it_is_all_the_video_has():
+    only_vp9 = track(heights=(720,), safe=False)
+    assert video_heights(only_vp9) == [720]
+    assert keys(build_options(only_vp9, SETTINGS)) == {"best", "audio"}
+
+
+def test_the_picker_is_capped_but_keeps_the_highest_qualities():
+    options = build_options(track(heights=tuple(range(144, 1440, 96))), SETTINGS)
+    videos = [option for option in options if not option.is_audio]
+    heights = [option.height for option in videos]
+
+    assert len(videos) <= MAX_VIDEO_OPTIONS
+    assert heights[0] == 1392, "the highest quality is always offered"
+    assert 144 not in heights, "the ladder is trimmed from the bottom, not the top"
+    assert heights == sorted(heights, reverse=True), "highest quality first"
+    assert len(set(heights)) == len(heights), "no duplicate buttons"
+
+
+def test_audio_is_offered_with_an_estimate_from_bitrate_and_duration():
+    audio = find_option(build_options(track(audio_bitrate=128_000, duration=100.0), SETTINGS), "audio")
+    assert audio is not None
+    assert audio.estimated_size == int(128_000 * 100 / 8)
+    assert "kbps" in audio.label
+
+
+def test_an_audio_track_above_the_upload_limit_says_so():
+    options = build_options(
+        track(audio_bitrate=256_000, duration=7200.0), SETTINGS, upload_limit_bytes=50 * 1024 * 1024
+    )
+    audio = find_option(options, "audio")
+    assert "limit" in audio.description
+
+
+def test_default_option_prefers_the_configured_quality():
+    options = build_options(track(), SETTINGS)  # DEFAULT_QUALITY=720p
+    assert default_option(options, SETTINGS).key == "720p"
+
+    only_144 = build_options(track(heights=(144,)), SETTINGS)
+    assert default_option(only_144, SETTINGS).key == "best"
+
+
+def test_audio_only_videos_offer_just_audio():
+    options = build_options(track(heights=()), SETTINGS)
+    assert keys(options) == {"audio"}
+
+
+def test_a_video_with_no_streams_offers_nothing():
+    empty = Track(
+        id="x",
+        title="t",
+        author="",
+        duration=0,
+        thumbnail="",
+        video_streams=(),
+        audio_streams=(),
+        latency_ms=0,
+        raw={},
+        url="u",
+    )
+    assert build_options(empty, SETTINGS) == []
+
+
+def test_smaller_options_are_the_retry_ladder():
+    options = build_options(track(), SETTINGS)
+    chosen = find_option(options, "best")
+    smaller = smaller_video_options(options, chosen)
+    assert [option.key for option in smaller] == ["720p", "360p"]
+
+    smallest = find_option(options, "360p")
+    assert smaller_video_options(options, smallest) == []
+
+
+def test_find_option_returns_none_for_an_unknown_key():
+    options = build_options(track(), SETTINGS)
     assert find_option(options, "480p") is None
     assert find_option(options, "720p").height == 720
-
-
-def test_audio_only_can_be_disabled():
-    settings = Settings(**{**SETTINGS.__dict__, "offer_audio_only": False})
-    keys = {option.key for option in build_options(INFO, settings)}
-    assert "audio" not in keys
-
-
-def test_callback_data_is_short_and_stable():
-    option = find_option(build_options(INFO, SETTINGS), "720p")
-    assert option.callback_data == "dl:720p"
-
-
-def test_empty_format_list_produces_no_options():
-    assert build_options({"formats": []}, SETTINGS) == []
-
-
-def test_direct_links_without_geometry_still_offer_the_original_file():
-    """A raw .mp4 URL arrives with vcodec/acodec unknown — offer it as-is."""
-    info = {
-        "title": "clip",
-        "duration": 3,
-        "direct": True,
-        "formats": [{"format_id": "mp4", "ext": "mp4", "url": "http://x/clip.mp4", "vcodec": None, "filesize": 66_000}],
-    }
-    options = build_options(info, SETTINGS)
-    assert [option.key for option in options] == ["best"]
-    assert options[0].label.startswith("Original")
-    assert options[0].format_selector == "best"
-
-
-def test_formats_with_unknown_codecs_but_no_direct_flag_are_still_offered():
-    assert build_options({"formats": [{"vcodec": None, "acodec": None}]}, SETTINGS)[0].key == "best"
-
-
-def test_height_selector_always_has_a_last_resort_fallback():
-    """Direct links report no heights; a pick must never fail the download."""
-    for height in (144, 240, 360, 720, 1080):
-        assert video_selector(height, settings=SETTINGS).endswith("/best")

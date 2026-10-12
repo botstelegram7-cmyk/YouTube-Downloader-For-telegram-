@@ -44,7 +44,7 @@ async def limits_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     settings = runtime(context).settings
     await _reply(
         update,
-        texts.limits_text(settings.upload_limit_mb, settings.api_upload_cap_mb, settings.api_mode),
+        texts.limits_text(settings.summary()),
     )
 
 

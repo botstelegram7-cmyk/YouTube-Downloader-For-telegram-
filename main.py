@@ -18,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-from bot import texts
+from bot import texts, typetube
 from bot.ffmpeg import ffmpeg_version
 from bot.logging_setup import setup_logging
 from bot.utils import disk_free_bytes, human_size
@@ -55,15 +55,14 @@ def apply_overrides(settings: Settings, args: argparse.Namespace) -> Settings:
 async def dependency_report(settings: Settings) -> dict[str, str]:
     """Which pieces of the toolchain are actually present."""
     report: dict[str, str] = {}
+
     ffmpeg = await ffmpeg_version(settings)
     report["ffmpeg"] = ffmpeg or "MISSING"
 
-    try:
-        from yt_dlp import version as ytdlp_version
-
-        report["yt_dlp"] = getattr(ytdlp_version, "__version__", "unknown")
-    except Exception as exc:
-        report["yt_dlp"] = f"MISSING ({exc})"
+    version = await typetube.cli_version(settings)
+    report["typetube"] = version or "MISSING"
+    node = typetube.node_version(settings.node_binary)
+    report["node"] = f"{node[0]}.{node[1]}" if node else "MISSING"
 
     try:
         import telegram
@@ -71,6 +70,13 @@ async def dependency_report(settings: Settings) -> dict[str, str]:
         report["python_telegram_bot"] = telegram.__version__
     except Exception:
         report["python_telegram_bot"] = "MISSING"
+
+    try:
+        import pyrogram
+
+        report["pyrofork"] = f"{pyrogram.__version__} (large uploads)"
+    except Exception:
+        report["pyrofork"] = "not installed (files stay under the Bot API limit)"
 
     return report
 
@@ -105,8 +111,18 @@ async def run_check(settings: Settings, *, online: bool) -> int:
 
     if "MISSING" in deps.get("ffmpeg", ""):
         problems.append("FFmpeg is required to mux video and audio.")
-    if "MISSING" in deps.get("yt_dlp", ""):
-        problems.append("yt-dlp is required to download media.")
+    problems.extend(typetube.ensure_available(settings))
+
+    print(
+        f"Transport          : {settings.transport} — up to {settings.upload_limit_mb} MB per file"
+        f" (Bot API allows {settings.api_upload_cap_mb} MB"
+        + (f", session allows {settings.mtproto_cap_mb} MB" if settings.mtproto_ready else "")
+        + ")"
+    )
+    if settings.transport == "mtproto" and not settings.mtproto_ready:
+        problems.append(
+            "UPLOAD_TRANSPORT=mtproto needs TELEGRAM_API_ID, TELEGRAM_API_HASH and TELEGRAM_SESSION_STRING."
+        )
 
     if online and not problems:
         try:

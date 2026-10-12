@@ -1,8 +1,10 @@
 # Run the bot together with a local Telegram Bot API server.
 #
 # Why you would use this file: through the cloud Bot API (api.telegram.org) a bot
-# may upload at most 50 MB per file — that is Telegram's limit and no setting in
-# this repository can lift it. A local Bot API server started with --local raises
+# may upload at most 50 MB per file. The recommended way past that is a Telegram
+# user session (see DEPLOYMENT.md step 4) and needs no extra service; the optional
+# local Bot API server below — enabled with `docker compose --profile local-api up`
+# — raises
 # the ceiling to 2000 MB, and this compose file wires the two containers together.
 #
 #   1. Create .env next to this file with BOT_TOKEN, TELEGRAM_API_ID and
@@ -14,6 +16,8 @@
 
 services:
   telegram-bot-api:
+    # Opt-in: `docker compose --profile local-api up -d --build`
+    profiles: ["local-api"]
     # Community image of Telegram's official server (tdlib/telegram-bot-api).
     image: aiogram/telegram-bot-api:latest
     restart: unless-stopped

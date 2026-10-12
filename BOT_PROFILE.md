@@ -15,7 +15,7 @@ in a repository cannot change your live bot.
                   title, not as anonymous documents. Use it only for content you own or
                   are allowed to save.
 
-/setabouttext   → 🎬 Video & audio downloader for Telegram · yt-dlp + FFmpeg · choose your quality
+/setabouttext   → 🎬 Video & audio downloader for Telegram · TypeTube + FFmpeg · choose your quality
 
 /setuserpic     → a simple download/play icon you have the rights to use
 ```
@@ -38,7 +38,7 @@ about - Version, engine and credits
 ## Keywords to include naturally
 
 video downloader, Telegram bot, download video to Telegram, choose quality, 144p, 240p,
-360p, 480p, 720p, 1080p, audio only, M4A, playable video, yt-dlp, FFmpeg.
+360p, 480p, 720p, 1080p, audio only, M4A, playable video, TypeTube, FFmpeg.
 
 Do not keyword-stuff: Telegram's directories and users both dislike it.
 
@@ -58,4 +58,4 @@ Environment variables for all of these are documented in `.env.example`.
 * Uploads: **50 MB** through Telegram's cloud API, **2000 MB** with a self-hosted Bot API
   server. That is Telegram's ceiling, not this bot's choice — `/limits` explains it to users.
 * One request per user at a time; a new link replaces the running one, `/cancel` stops it.
-* No DRM bypass, no login-gated content unless you supply your own `COOKIES_FILE`.
+* No DRM bypass and no login-gated content: the engine fetches as an anonymous client.

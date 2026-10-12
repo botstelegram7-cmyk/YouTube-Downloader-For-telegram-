@@ -1,4 +1,8 @@
-"""Request management: one job per user, cancellation, cleanup."""
+"""Request management: one job per user, cancellation, cleanup.
+
+The download itself is stubbed out — what is under test here is the lifecycle: a new link
+replaces the running job, ``/cancel`` stops it, and no job leaves files behind.
+"""
 
 from __future__ import annotations
 
@@ -6,21 +10,28 @@ import asyncio
 
 from bot.jobs import JobManager
 from bot.qualities import build_options, find_option
+from bot.typetube import Stream, Track
 from bot.utils import make_temp_dir
 from config import load_settings
 
 SETTINGS = load_settings({"BOT_TOKEN": "123456789:" + "A" * 35, "DOWNLOAD_DIR": "/tmp/ytbot-test-jobs"})
 
-INFO = {
-    "title": "Test video",
-    "duration": 60,
-    "formats": [
-        {"ext": "mp4", "vcodec": "avc1", "acodec": "none", "height": 720, "filesize": 10_000_000},
-        {"ext": "mp4", "vcodec": "avc1", "acodec": "none", "height": 360, "filesize": 4_000_000},
-        {"ext": "m4a", "vcodec": "none", "acodec": "mp4a", "abr": 128, "filesize": 1_000_000},
-    ],
-}
-OPTIONS = build_options(INFO, SETTINGS)
+TRACK = Track(
+    id="abcdefghijk",
+    title="Test video",
+    author="Test channel",
+    duration=60,
+    thumbnail="",
+    video_streams=(
+        Stream(itag=136, quality="720p", mime='video/mp4; codecs="avc1"', url="u", resolution="1280x720"),
+        Stream(itag=18, quality="360p", mime='video/mp4; codecs="avc1"', url="u", resolution="640x360"),
+    ),
+    audio_streams=(Stream(itag=140, quality="130kbps", mime="audio/mp4", url="u", bitrate=128_000),),
+    latency_ms=50,
+    raw={},
+    url="https://www.youtube.com/watch?v=abcdefghijk",
+)
+OPTIONS = build_options(TRACK, SETTINGS)
 
 
 class FakeMessage:
@@ -74,14 +85,15 @@ def make_manager(monkeypatch, *, hold: float = 30.0) -> tuple[JobManager, FakeBo
     return manager, bot, state
 
 
-async def start(manager: JobManager, *, user_id: int = 1, key: str = "720p", message_id: int = 5):
+async def start(manager: JobManager, *, user_id: int = 1, key: str = "best", message_id: int = 5):
     return await manager.start_job(
         chat_id=user_id,
         user_id=user_id,
-        url="https://example.com/video",
+        url=TRACK.url,
         option=find_option(OPTIONS, key),
-        title="Test video",
+        title=TRACK.title,
         token="tok12345",
+        track=TRACK,
         reply_to_message_id=1,
         status_message=FakeMessage(message_id),
     )

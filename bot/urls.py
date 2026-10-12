@@ -1,161 +1,111 @@
-"""Link handling: extraction, cleaning and a safety check before yt-dlp fetches.
+"""Link handling: pull the link out of a message and prove it is one we can serve.
 
-The bot accepts arbitrary URLs, which means it can be told to fetch things that are
-not on the public internet (cloud metadata endpoints, internal services). yt-dlp
-would happily follow those, so every link is checked against the private address
-spaces first.
+Two rules matter here.
+
+**Quote the right risk.** The engine (TypeTube) only understands YouTube, and it treats
+anything it does not recognise as a *search query* — a Vimeo link would quietly download an
+unrelated YouTube video. So every link is checked and canonicalised before it reaches the
+engine, and everything else is refused with an explanation.
+
+**Canonicalise, don't guess.** ``youtu.be/ID``, ``/shorts/ID``, ``/live/ID``, ``/embed/ID``,
+``music.youtube.com`` and playlist-laden watch URLs all become one canonical
+``https://www.youtube.com/watch?v=ID``. A bare 11-character video id is accepted too, since
+that is what people copy from the app.
 """
 
 from __future__ import annotations
 
-import asyncio
-import ipaddress
 import re
-import socket
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlparse
 
-URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
-#: Query parameters that only exist to track the share.
-TRACKING_PARAMS = {
-    "si",
-    "feature",
-    "pp",
-    "ab_channel",
-    "utm_source",
-    "utm_medium",
-    "utm_campaign",
-    "utm_term",
-    "utm_content",
-    "fbclid",
-    "gclid",
-    "igshid",
-    "spm",
-    "ref",
-    "ref_src",
-}
+#: Hosts whose paths are understood (``www.`` is optional on all of them).
+YOUTUBE_HOSTS = (
+    "youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtube-nocookie.com",
+    "youtu.be",
+)
 
-#: Hostnames that resolve to infrastructure rather than content.
-BLOCKED_HOSTS = {
-    "localhost",
-    "localhost.localdomain",
-    "metadata.google.internal",
-    "metadata.goog",
-    "instance-data",
-    "metadata",
-}
+#: Path prefixes that carry a video id as the next segment.
+ID_PATHS = ("shorts", "live", "embed", "v", "watch")
 
-MAX_URL_LENGTH = 2048
+CANONICAL = "https://www.youtube.com/watch?v={id}"
 
 
-def clean_url(url: str) -> str:
-    """Drop tracking parameters and trailing punctuation from a URL."""
-    url = (url or "").strip().strip("<>\"'")
-    url = url.rstrip(").,;:!?")
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return url
-
-    if not parts.query:
-        return urlunsplit(parts)
-
-    query = [
-        (key, value)
-        for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if key.lower() not in TRACKING_PARAMS
-    ]
-    return urlunsplit(parts._replace(query=urlencode(query)))
+def _host_ok(host: str) -> bool:
+    host = (host or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host in YOUTUBE_HOSTS
 
 
 def extract_url(text: str) -> str | None:
-    """Return the first http(s) URL in ``text``, cleaned, or ``None``."""
-    if not text:
-        return None
-    match = URL_RE.search(text)
+    """First ``http(s)`` URL in the text, with trailing punctuation removed."""
+    match = URL_RE.search(text or "")
     if not match:
         return None
-    url = clean_url(match.group(0))
-    return url or None
+    return match.group(0).rstrip(".,;:!?")
 
 
-def looks_like_url(text: str) -> bool:
-    return extract_url(text) is not None
+def _video_id_from_parts(parsed) -> str | None:
+    query = parse_qs(parsed.query)
+    candidate = (query.get("v") or [""])[0]
+    if VIDEO_ID_RE.match(candidate or ""):
+        return candidate
+
+    segments = [segment for segment in (parsed.path or "").split("/") if segment]
+    if not segments:
+        return None
+    if segments[0] in ID_PATHS and len(segments) > 1 and VIDEO_ID_RE.match(segments[1]):
+        return segments[1]
+    if VIDEO_ID_RE.match(segments[0]):
+        return segments[0]
+    return None
 
 
-def ip_is_public(ip: str) -> bool:
-    """True when an IP literal is routable on the public internet."""
+def canonise(url: str) -> str | None:
+    """Return the canonical watch URL for a YouTube link, or ``None``."""
     try:
-        address = ipaddress.ip_address(ip)
+        parsed = urlparse(url)
     except ValueError:
-        return False
-    if address.version == 6 and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
-    return not (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-        or address.is_unspecified
-    )
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    if not _host_ok(parsed.hostname or ""):
+        return None
+    video_id = _video_id_from_parts(parsed)
+    return CANONICAL.format(id=video_id) if video_id else None
 
 
-def _resolve(host: str) -> list[str]:
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError:
-        return []
-    return sorted({info[4][0] for info in infos})
+def youtube_link(text: str) -> tuple[str | None, str]:
+    """``(canonical_url, reason)`` for a message.
 
-
-def check_url_safety(url: str, resolver=_resolve, *, allow_private: bool = False) -> tuple[bool, str]:
-    """Return ``(allowed, reason)`` for a URL before it is handed to yt-dlp.
-
-    ``allow_private`` is for local testing only (the end-to-end harness serves its
-    fixture on 127.0.0.1); it is off in every deployment.
+    ``reason`` is empty when a link was found; otherwise it explains the refusal in
+    user-facing language.
     """
-    if not url:
-        return False, "Empty link."
-    if len(url) > MAX_URL_LENGTH:
-        return False, "That link is unusually long."
+    text = (text or "").strip()
+    if not text:
+        return None, ""
 
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return False, "That link could not be parsed."
+    url = extract_url(text)
+    if url is not None:
+        canonical = canonise(url)
+        if canonical:
+            return canonical, ""
+        host = (urlparse(url).hostname or url).lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return None, f"{host} is not a YouTube link."
 
-    if parts.scheme not in ("http", "https"):
-        return False, "Only http and https links are supported."
+    # A bare video id, pasted on its own.
+    if VIDEO_ID_RE.match(text):
+        return CANONICAL.format(id=text), ""
 
-    host = (parts.hostname or "").lower()
-    if not host:
-        return False, "That link has no hostname."
-
-    if allow_private:
-        return True, ""
-
-    if host in BLOCKED_HOSTS:
-        return False, "That host is not reachable from the public internet."
-
-    try:
-        literal = ipaddress.ip_address(host)
-    except ValueError:
-        literal = None
-
-    if literal is not None:
-        if not ip_is_public(str(literal)):
-            return False, "That address points inside a private network."
-        return True, ""
-
-    addresses = resolver(host)
-    if not addresses:
-        return False, f"Could not resolve {host}."
-    if any(not ip_is_public(address) for address in addresses):
-        return False, "That hostname resolves to a private network address."
-    return True, ""
+    return None, ""
 
 
-async def check_url_safety_async(url: str, *, allow_private: bool = False) -> tuple[bool, str]:
-    """``check_url_safety`` without blocking the event loop during DNS."""
-    return await asyncio.to_thread(check_url_safety, url, allow_private=allow_private)
+__all__ = ["CANONICAL", "VIDEO_ID_RE", "YOUTUBE_HOSTS", "canonise", "extract_url", "youtube_link"]

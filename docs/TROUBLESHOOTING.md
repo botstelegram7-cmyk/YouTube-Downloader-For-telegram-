@@ -138,20 +138,20 @@ item is downloaded — a bot that silently starts 400 downloads is not a feature
 
 ## Probing fails
 
-Probing means yt-dlp listing the formats of a link without downloading (45-second limit;
+Resolving means the TypeTube CLI reporting a link's streams without downloading (45 s limit;
 `INSPECT_TIMEOUT` in `bot/handlers/links.py`). The failure text in chat lists the usual
 causes; in the log, one of these appears:
 
 | Log line | Meaning and fix |
 |---|---|
 | `probe timed out` | The site is slow or throttling. Try again; always-on hosts with a distant region (a US datacentre for an Indian-only site) are the usual culprit. Consider `PROXY`. |
-| `Unsupported URL` | yt-dlp has no extractor for that site. Nothing to fix here — the bot reports "no downloadable formats". |
-| `Sign in to confirm you're not a bot` / `Private video` / `age` | The video needs cookies: set `COOKIES_FILE` (see [DEPLOYMENT step 5](DEPLOYMENT.md#step-5--age-restricted-or-sign-in-only-videos-cookies)). |
+| Not a YouTube link | The bot refuses non-YouTube URLs before the engine sees them, and says which host it rejected. |
+| Private, members-only or age-restricted | The cluster fetches anonymously, so these are unavailable; the bot explains instead of retrying. |
 | `HTTP Error 403` | Region/IP block — a proxy is the usual answer. |
 | `No downloadable formats` | It is a live stream, a text page, or a page whose media loads only after login. |
 
-**A stale yt-dlp is the single most common cause of sudden probe failures.** Sites change
-weekly; rebuild the image (`docker compose build --no-cache bot`) or `pip install -U yt-dlp`.
+**A stale engine is the most common cause of sudden resolve failures.** YouTube changes
+constantly; bump `TYPETUBE_VERSION` in the Dockerfile and rebuild.
 
 ---
 
@@ -162,7 +162,7 @@ format selector ends in a plain `best` fallback, so a pick can never fail merely
 the source's metadata was thin (direct media URLs, unusual extractors). If you still see it,
 the source changed between the probe and the download — send the link again.
 
-**The download stops at a random percentage.** Check the log for yt-dlp's own reason:
+**The download stops at a random percentage.** Check the log for the engine's own `[Error]` line:
 `HTTP Error 429` (rate-limited — wait, or set `PROXY`), `Connection reset` (retried
 automatically `YTDLP_RETRIES` times), or `read timed out` (raise
 `YTDLP_SOCKET_TIMEOUT`). The job fails cleanly and its temp files are removed.
@@ -209,7 +209,7 @@ stops; nothing to fix.
 
 **No sound.** The chosen quality was video-only (normal for 1080p+ on many sites) and the
 audio stream could not be muxed. The log says which FFmpeg command failed. Common causes:
-a source whose audio yt-dlp could not fetch (retry, or use cookies), or a full disk during
+a source whose audio the engine could not fetch (retry), or a full disk during
 muxing. `Video has no audio track` in the log means the *source* had none — that is on the
 source, not the bot.
 
@@ -233,7 +233,7 @@ and the bot leaves room for the source link). Long titles are truncated with an 
 **`/cancel` says "Nothing is running for you right now."** The job already finished,
 failed or was auto-cancelled by a newer request. `/status` shows what is actually running.
 
-**A child process survived a cancel.** Every yt-dlp/FFmpeg process is registered in
+**A child process survived a cancel.** Every engine/FFmpeg process is registered in
 `ProcessRegistry`, which sends `SIGTERM`, waits briefly, then `SIGKILL`s whatever is still
 alive. If a process is stuck in uninterruptible I/O (a dead NFS mount, a wedged disk), even
 `SIGKILL` cannot help — restart the container.

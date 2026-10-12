@@ -4,10 +4,11 @@
 What it does:
 
 1. builds a small test video with FFmpeg,
-2. serves it over HTTP (yt-dlp's generic extractor downloads it like any other link),
+2. copies the engine stub (scripts/e2e_engine_stub.py), which answers ``resolve --json``
+   and ``download`` with that video — the real TypeTube contract, without the network,
 3. runs a mock Telegram Bot API that records every call,
 4. starts this repository's bot against that mock, in webhook mode,
-5. injects a link message, presses a quality button, and waits for the upload,
+5. injects a YouTube link, presses a quality button, and waits for the upload,
 6. asserts the delivered video has dimensions, a duration, a thumbnail, a caption
    and streaming enabled — and that the bot shuts down cleanly on SIGTERM.
 
@@ -58,6 +59,10 @@ def _find_repo_root() -> Path:
 
 ROOT = _find_repo_root()
 TOKEN = "123456789:placeholder-token-used-only-by-the-e2e-harness"
+#: A real YouTube-shaped link — the bot refuses anything else before it reaches the engine.
+LINK = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+#: The title the stub reports for that link.
+STUB_TITLE = "E2E Test clip"
 WEBHOOK_SECRET = "e2e-local-secret"
 CHAT_ID = 5550001
 USER_ID = 5550001
@@ -265,6 +270,25 @@ def build_test_video(ffmpeg: str, directory: Path) -> Path:
     raise RuntimeError(f"Could not build a test video with {ffmpeg}: {completed.stderr[-400:]}")
 
 
+def write_engine_stub(directory: Path, source: Path, title: str) -> Path:
+    """Put an executable stand-in for the TypeTube CLI into the workspace.
+
+    The stub is a real file in this repository (``scripts/e2e_engine_stub.py``) so it can be
+    linted and read; it is copied into the writable workspace and handed the fixture through
+    the environment. It speaks the CLI's contract exactly: ``resolve --json``, a ``download``
+    that writes a file and reports ``Completed: <path> (<mb> MB in <s>s)``, and progress sent
+    with carriage returns — which is what the Python layer really has to cope with.
+    """
+    origin = ROOT / "scripts" / "e2e_engine_stub.py"
+    if not origin.is_file():
+        origin = Path(__file__).resolve().parent / "e2e_engine_stub.py"
+
+    target = directory / "typetube-stub"
+    shutil.copyfile(origin, target)
+    target.chmod(0o755)
+    return target
+
+
 # --------------------------------------------------------------------------- #
 # Harness
 # --------------------------------------------------------------------------- #
@@ -343,31 +367,22 @@ async def run(args: argparse.Namespace) -> int:
     runners = []
 
     try:
-        # 1. fixture ---------------------------------------------------------
+        # 1. fixture and engine stub -----------------------------------------
         video = build_test_video(ffmpeg, workdir)
         ok(f"test video built ({video.stat().st_size / 1024:.0f} KB, 320×240, 3 s)")
+        stub = write_engine_stub(workdir, video, STUB_TITLE)
+        ok(f"engine stub ready ({stub.name})")
 
-        # 2. servers ---------------------------------------------------------
+        # 2. mock Bot API ----------------------------------------------------
         mock = MockBotAPI()
-
-        static_app = web.Application()
-        static_app.router.add_get("/clip.mp4", lambda _r: web.FileResponse(video))
-
         api_runner = web.AppRunner(mock.app, access_log=None)
         await api_runner.setup()
         api_site = web.TCPSite(api_runner, "127.0.0.1", args.api_port)
         await api_site.start()
         runners.append(api_runner)
 
-        static_runner = web.AppRunner(static_app, access_log=None)
-        await static_runner.setup()
-        static_site = web.TCPSite(static_runner, "127.0.0.1", args.media_port)
-        await static_site.start()
-        runners.append(static_runner)
-
-        media_url = f"http://127.0.0.1:{args.media_port}/clip.mp4"
         webhook_url = f"http://127.0.0.1:{args.bot_port}"
-        ok(f"mock Bot API on :{args.api_port}, media on :{args.media_port}, webhook {webhook_url}")
+        ok(f"mock Bot API on :{args.api_port}, webhook {webhook_url}")
 
         # 3. the bot ---------------------------------------------------------
         env = {
@@ -383,8 +398,11 @@ async def run(args: argparse.Namespace) -> int:
             else "ffprobe",
             "DOWNLOAD_DIR": str(downloads),
             "MAX_UPLOAD_MB": "50",
-            # The fixture is served on loopback, which the normal SSRF guard blocks.
-            "ALLOW_PRIVATE_URLS": "true",
+            # The engine is the stub above, invoked exactly like the real CLI.
+            "TYPETUBE_BIN": str(stub),
+            "TYPETUBE_WORKERS": "2",
+            "E2E_STUB_SOURCE": str(video),
+            "E2E_STUB_TITLE": STUB_TITLE,
             "MAX_CONCURRENT_JOBS": "1",
             "PROGRESS_INTERVAL": "0.5",
             "STARTUP_NOTIFY_CHAT_ID": str(CHAT_ID),
@@ -452,8 +470,8 @@ async def run(args: argparse.Namespace) -> int:
             ok("command menu published to Telegram")
 
         # 4. send a link ------------------------------------------------------
-        log(f"Sending a link: {media_url}")
-        await post_webhook(session, f"{webhook_url}/telegram", update_message(media_url))
+        log(f"Sending a link: {LINK}")
+        await post_webhook(session, f"{webhook_url}/telegram", update_message(LINK))
 
         keyboard_calls = await wait_for(
             lambda: [
@@ -578,7 +596,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local end-to-end check (no Telegram account needed)")
     parser.add_argument("--ffmpeg", default=os.getenv("FFMPEG_BINARY", ""), help="path to the ffmpeg binary")
     parser.add_argument("--api-port", type=int, default=8091, help="port for the mock Bot API")
-    parser.add_argument("--media-port", type=int, default=8092, help="port serving the test video")
     parser.add_argument("--bot-port", type=int, default=8093, help="port the bot's webhook server listens on")
     parser.add_argument("--keep-files", action="store_true", help="keep the workspace and logs")
     return parser.parse_args()

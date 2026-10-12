@@ -8,7 +8,7 @@ from datetime import datetime
 from telegram.ext import ContextTypes
 
 from bot.jobs import JobManager
-from bot.probe import ProbeCache
+from bot.typetube import TrackCache
 from bot.utils import utc_now
 from config import Settings
 
@@ -21,7 +21,8 @@ class Runtime:
 
     settings: Settings
     manager: JobManager
-    probes: ProbeCache = field(default_factory=ProbeCache)
+    tracks: TrackCache = field(default_factory=TrackCache)
+    uploader: object | None = None
     started_at: datetime = field(default_factory=utc_now)
     background_tasks: set = field(default_factory=set)
 

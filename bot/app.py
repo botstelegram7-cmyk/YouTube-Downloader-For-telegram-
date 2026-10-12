@@ -33,8 +33,9 @@ from bot.handlers import (
     status_command,
 )
 from bot.jobs import JobManager
-from bot.probe import ProbeCache
+from bot.mtproto import MtprotoUploader
 from bot.runtime import BOT_DATA_KEY, Runtime
+from bot.typetube import TrackCache
 from config import VERSION, Settings
 
 log = logging.getLogger("bot.app")
@@ -70,11 +71,13 @@ def build_application(settings: Settings) -> Application:
 
     application = builder.build()
 
-    job_manager = JobManager(settings, application.bot)
+    uploader = MtprotoUploader(settings)
+    job_manager = JobManager(settings, application.bot, uploader=uploader)
     application.bot_data[BOT_DATA_KEY] = Runtime(
         settings=settings,
         manager=job_manager,
-        probes=ProbeCache(),
+        tracks=TrackCache(),
+        uploader=uploader,
     )
 
     # Commands -----------------------------------------------------------------
@@ -102,6 +105,22 @@ async def on_startup(application: Application) -> None:
     settings = rt.settings
 
     await _publish_commands(application)
+
+    uploader: MtprotoUploader | None = rt.uploader
+    if uploader is not None and uploader.ready:
+        try:
+            await uploader.start()
+            account = await uploader.account()
+            log.info(
+                "Large uploads enabled: session on account %s (premium=%s, up to %s MB)",
+                account["id"],
+                account["premium"],
+                account["cap_mb"],
+            )
+        except Exception as exc:
+            log.error("MTProto session unavailable, large uploads disabled: %s", exc)
+    elif uploader is not None:
+        log.info("Large uploads disabled: %s", uploader.reason())
 
     try:
         me = await application.bot.get_me()
@@ -145,3 +164,7 @@ async def on_shutdown(application: Application) -> None:
     stopped = await rt.manager.cancel_all()
     if stopped:
         log.info("Cancelled %s job(s) during shutdown", stopped)
+
+    uploader = getattr(rt, "uploader", None)
+    if uploader is not None:
+        await uploader.stop()

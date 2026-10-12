@@ -1,4 +1,15 @@
-"""Downloading with yt-dlp: progress, cancellation, muxing and verification."""
+"""Turning a chosen quality into a verified, playable file.
+
+The engine does the heavy lifting: TypeTube resolves the streams, pulls them down with
+parallel range workers and muxes video + audio with FFmpeg. This module owns everything
+after that, and it is where the promises to the user are kept:
+
+* the delivered file really plays (ffprobe said so, not the metadata),
+* MP4 is faststart so Telegram can stream it while it downloads,
+* audio is M4A, converting only when the source is not,
+* the thumbnail is a real JPEG under Telegram's 200 kB limit,
+* the size is checked against the upload ceiling *before* anything is sent.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +21,9 @@ from pathlib import Path
 
 from bot.errors import DownloadCancelled, DownloadError, TooLargeError
 from bot.ffmpeg import (
+    THUMBNAIL_LIMIT_BYTES,
     MediaProbe,
+    convert_audio,
     convert_thumbnail,
     ensure_faststart,
     make_thumbnail,
@@ -18,17 +31,21 @@ from bot.ffmpeg import (
 )
 from bot.process import ProcessRegistry
 from bot.qualities import QualityOption
+from bot.typetube import DownloadProgress, Track
+from bot.typetube import download as typetube_download
 from config import Settings
 
 log = logging.getLogger("bot.download")
 
-MEDIA_STEM = "media"
-_IGNORED_SUFFIXES = {".part", ".ytdl", ".json", ".jpg", ".jpeg", ".png", ".webp", ".description"}
+PHASE_ICONS = {"download": "⬇️", "convert": "🎛", "upload": "⬆️"}
+
+#: Audio containers Telegram accepts for sendAudio without complaint.
+AUDIO_KEEP = {".m4a", ".mp3"}
 
 
 @dataclass
 class ProgressUpdate:
-    """One progress sample, sent from the download thread to the status message."""
+    """One progress sample, handed to the status message."""
 
     phase: str
     percent: float | None = None
@@ -55,273 +72,175 @@ class DownloadResult:
     faststart: bool
     probe: MediaProbe
     artist: str = ""
+    source_url: str = ""
 
     @property
     def resolution(self) -> str:
         return self.probe.resolution
 
 
-def _download_params(settings: Settings, option: QualityOption, dest_dir: Path, hook) -> dict:
-    params = {
-        "format": option.format_selector,
-        "outtmpl": str(dest_dir / f"{MEDIA_STEM}.%(ext)s"),
-        "noplaylist": not settings.allow_playlist,
-        "quiet": True,
-        "no_warnings": True,
-        "no_color": True,
-        "noprogress": True,
-        "consoletitle": False,
-        "progress_hooks": [hook],
-        "socket_timeout": settings.ytdlp_socket_timeout,
-        "retries": settings.ytdlp_retries,
-        "fragment_retries": settings.ytdlp_retries,
-        "concurrent_fragment_downloads": settings.fragment_concurrency,
-        "overwrites": True,
-        "continuedl": True,
-        "prefer_free_formats": settings.prefer_free_formats,
-        "trim_file_name": 120,
-        "restrictfilenames": False,
-        "windowsfilenames": False,
-        "writethumbnail": True,
-        "merge_output_format": "mp4",
-    }
-    if settings.allow_playlist:
-        params["playlist_items"] = "1"
-    if settings.cookies_file:
-        params["cookiefile"] = settings.cookies_file
-    if settings.proxy:
-        params["proxy"] = settings.proxy
-    if settings.user_agent:
-        params["http_headers"] = {"User-Agent": settings.user_agent}
+def _bridge(on_progress: Callable[[ProgressUpdate], None]):
+    """Translate TypeTube's progress into the status message's own vocabulary."""
 
-    if option.is_audio:
-        params["postprocessors"] = [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": settings.audio_format,
-                "preferredquality": "0",
-                "nopostoverwrites": False,
-            }
-        ]
-    else:
-        # Merge the two streams and put the MP4 index at the front in one pass.
-        params["postprocessor_args"] = {"ffmpeg": ["-movflags", "+faststart"]}
-    return params
+    def handle(progress: DownloadProgress) -> None:
+        phase = {"downloading": "download", "muxing": "convert", "complete": "download"}.get(progress.phase, "download")
+        note = ""
+        if progress.phase == "muxing":
+            note = "Muxing video and audio…"
+        elif progress.phase == "complete":
+            note = "Download complete."
+        percent = 100.0 if progress.phase == "complete" else progress.percent
+        on_progress(
+            ProgressUpdate(
+                phase=phase,
+                percent=percent,
+                downloaded=progress.downloaded_bytes,
+                total=progress.total_bytes or None,
+                speed=(progress.speed_mbps * 1024 * 1024) or None,
+                note=note,
+            )
+        )
+
+    return handle
 
 
-def _find_media_file(directory: Path) -> Path | None:
-    """The biggest real media file in ``directory`` (ignores parts and images)."""
-    candidates: list[tuple[int, Path]] = []
-    for path in directory.iterdir():
-        if not path.is_file() or path.name.startswith("."):
-            continue
-        if path.suffix.lower() in _IGNORED_SUFFIXES or ".part" in path.name or path.name.endswith(".ytdl"):
-            continue
-        if path.name.startswith(MEDIA_STEM):
-            try:
-                candidates.append((path.stat().st_size, path))
-            except OSError:
-                continue
-    if not candidates:
+async def _audio_path(media: Path, settings: Settings, *, registry, cancel_event) -> Path:
+    """Deliver audio as M4A: TypeTube may hand back Opus/WebM, which Telegram will not tag."""
+    if media.suffix.lower() in AUDIO_KEEP:
+        return media
+    converted = await convert_audio(
+        media,
+        media.with_suffix(".m4a"),
+        settings,
+        registry=registry,
+        cancel_event=cancel_event,
+    )
+    if converted is None:
+        raise DownloadError("The audio track could not be converted to M4A.")
+    log.info("Converted %s to M4A for delivery", media.name)
+    return converted
+
+
+async def _cover_for_audio(track: Track, target: Path, settings: Settings, *, registry, cancel_event) -> Path | None:
+    """Cover art for an audio upload: the video's own still, resized to Telegram's limits."""
+    import aiohttp
+
+    if not track.thumbnail:
         return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
-
-
-def _find_thumbnail_file(directory: Path) -> Path | None:
-    for path in sorted(directory.iterdir()):
-        if (
-            path.is_file()
-            and path.name.startswith(MEDIA_STEM)
-            and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-        ):
-            return path
-    return None
-
-
-def download_sync(
-    url: str,
-    *,
-    settings: Settings,
-    option: QualityOption,
-    dest_dir: Path,
-    on_progress: Callable[[ProgressUpdate], None],
-    cancel_event: asyncio.Event,
-) -> tuple[Path, dict]:
-    """Blocking yt-dlp download with a progress/cancel hook (runs in a thread)."""
-    from yt_dlp import YoutubeDL
-    from yt_dlp.utils import DownloadError
-
-    last_reported = {"downloaded": 0}
-
-    def hook(payload: dict) -> None:
-        if cancel_event.is_set():
-            raise DownloadCancelled()
-
-        status = payload.get("status")
-        if status == "downloading":
-            downloaded = int(payload.get("downloaded_bytes") or 0)
-            total = payload.get("total_bytes") or payload.get("total_bytes_estimate")
-            percent = None
-            if total:
-                percent = min(100.0, downloaded * 100.0 / float(total))
-            on_progress(
-                ProgressUpdate(
-                    phase="download",
-                    percent=percent,
-                    downloaded=downloaded,
-                    total=int(total) if total else None,
-                    speed=payload.get("speed"),
-                    eta=payload.get("eta"),
-                )
-            )
-            last_reported["downloaded"] = downloaded
-        elif status == "finished":
-            on_progress(
-                ProgressUpdate(
-                    phase="convert",
-                    percent=None,
-                    downloaded=last_reported["downloaded"],
-                    total=last_reported["downloaded"],
-                    note="Muxing audio and video…",
-                )
-            )
-
+    raw = target.with_name("cover.jpg")
     try:
-        with YoutubeDL(_download_params(settings, option, dest_dir, hook)) as ydl:
-            info = ydl.extract_info(url, download=True)
-    except DownloadCancelled:
-        raise
-    except DownloadError as exc:
-        from bot.probe import clean_error
-
-        raise DownloadError(clean_error(str(exc))) from exc
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session, session.get(track.thumbnail) as response:
+            if response.status != 200:
+                return None
+            data = await response.read()
+        if not data or len(data) > 4 * 1024 * 1024:
+            return None
+        raw.write_bytes(data)
     except Exception as exc:
-        from bot.probe import clean_error
+        log.debug("Could not fetch cover art: %s", exc)
+        return None
 
-        raise DownloadError(clean_error(str(exc))) from exc
-
-    if not info:
-        raise DownloadError("The site returned no media for that link.")
-    if info.get("_type") == "playlist" and info.get("entries"):
-        entries = [entry for entry in info["entries"] if entry]
-        info = entries[0] if entries else info
-    return dest_dir, info
+    converted = await convert_thumbnail(raw, target, settings)
+    if converted is not None and converted.stat().st_size <= THUMBNAIL_LIMIT_BYTES:
+        return converted
+    return None
 
 
 async def download_media(
     *,
     url: str,
     option: QualityOption,
+    track: Track | None,
     dest_dir: Path,
     settings: Settings,
     on_progress: Callable[[ProgressUpdate], None],
     cancel_event: asyncio.Event,
     registry: ProcessRegistry,
 ) -> DownloadResult:
-    """Download, convert, verify and describe a media file.
+    """Download, verify and describe one file.
 
-    Raises :class:`DownloadCancelled`, :class:`TooLargeError` or
-    :class:`DownloadError`; the caller turns those into messages.
+    Raises :class:`DownloadCancelled`, :class:`TooLargeError` or :class:`DownloadError`;
+    the caller turns those into messages.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
+    kind = "audio" if option.is_audio else "video"
     on_progress(ProgressUpdate(phase="download", percent=0.0, note="Starting…"))
 
-    _, info = await asyncio.to_thread(
-        download_sync,
+    outcome = await typetube_download(
         url,
+        dest_dir,
         settings=settings,
-        option=option,
-        dest_dir=dest_dir,
-        on_progress=on_progress,
+        quality=option.target or "highest",
+        audio_only=option.is_audio,
+        registry=registry,
         cancel_event=cancel_event,
+        on_progress=_bridge(on_progress),
     )
 
     if cancel_event.is_set():
         raise DownloadCancelled()
 
-    media_path = _find_media_file(dest_dir)
-    if media_path is None:
-        raise DownloadError("The download finished but produced no media file.")
+    media_path = outcome.path
+    if not media_path.is_file() or media_path.stat().st_size < 1024:
+        raise DownloadError("The download finished but produced no usable file.")
 
-    on_progress(ProgressUpdate(phase="convert", percent=None, note="Verifying the file…"))
-
-    kind = "audio" if option.is_audio else "video"
+    on_progress(ProgressUpdate(phase="convert", percent=None, note="Checking the file…"))
     probe = await probe_media(media_path, settings, registry=registry, cancel_event=cancel_event)
 
-    if kind == "audio" and settings.audio_format != "m4a":
-        # mp3 is produced by yt-dlp's own postprocessor already.
-        pass
-
-    if kind == "audio" and not probe.has_audio:
-        raise DownloadError("That link produced a file with no audio stream.")
-
-    if kind == "video":
+    if kind == "audio":
+        if not probe.has_audio:
+            raise DownloadError("That link produced a file with no audio track.")
+        media_path = await _audio_path(media_path, settings, registry=registry, cancel_event=cancel_event)
+        probe = await probe_media(media_path, settings, registry=registry, cancel_event=cancel_event)
+        faststart = True
+    else:
         if not probe.has_video:
-            raise DownloadError("That link produced a file with no video stream.")
+            raise DownloadError("That link produced a file with no video track.")
+        on_progress(ProgressUpdate(phase="convert", percent=None, note="Preparing for streaming…"))
         media_path, faststart = await ensure_faststart(
             media_path, settings, registry=registry, cancel_event=cancel_event
         )
         probe = await probe_media(media_path, settings, registry=registry, cancel_event=cancel_event)
-    else:
-        faststart = True
 
     size = media_path.stat().st_size
     if size > settings.upload_limit_bytes:
         raise TooLargeError(size, settings.upload_limit_mb)
 
-    thumbnail = await _prepare_thumbnail(
-        dest_dir, media_path, probe, settings, kind=kind, registry=registry, cancel_event=cancel_event
-    )
-
-    title = str(info.get("title") or media_path.stem)
-    artist = str(info.get("artist") or info.get("uploader") or info.get("channel") or "")
-    if kind == "audio":
-        title = str(info.get("track") or info.get("title") or title)
-
-    return DownloadResult(
-        path=media_path,
-        title=title,
-        duration=probe.duration or float(info.get("duration") or 0),
-        width=probe.width,
-        height=probe.height,
-        size=size,
-        kind=kind,
-        quality_label=("Audio" if kind == "audio" else (f"{option.height}p" if option.height else "Best")),
-        thumbnail=thumbnail,
-        faststart=faststart,
-        probe=probe,
-        artist=artist,
-    )
-
-
-async def _prepare_thumbnail(
-    dest_dir: Path,
-    media_path: Path,
-    probe: MediaProbe,
-    settings: Settings,
-    *,
-    kind: str,
-    registry: ProcessRegistry,
-    cancel_event: asyncio.Event,
-) -> Path | None:
-    """A JPEG under 200 kB: the site's own artwork when possible, else a frame."""
-    target = dest_dir / "thumb.jpg"
-
-    source_image = _find_thumbnail_file(dest_dir)
-    if source_image is not None:
-        converted = await convert_thumbnail(source_image, target, settings)
-        if converted is not None:
-            log.debug("Using the site thumbnail for the upload")
-            return converted
-
-    if kind == "video" and probe.has_video:
-        return await make_thumbnail(
+    thumbnail: Path | None
+    if kind == "video":
+        thumbnail = await make_thumbnail(
             media_path,
-            target,
+            dest_dir / "thumb.jpg",
             settings,
             duration=probe.duration,
             registry=registry,
             cancel_event=cancel_event,
         )
-    return None
+    else:
+        thumbnail = (
+            await _cover_for_audio(
+                track, dest_dir / "thumb.jpg", settings, registry=registry, cancel_event=cancel_event
+            )
+            if track
+            else None
+        )
+
+    title = (track.title if track and track.title else outcome.title) or media_path.stem
+    artist = track.author if track else ""
+
+    return DownloadResult(
+        path=media_path,
+        title=title,
+        duration=probe.duration or (track.duration if track else 0.0),
+        width=probe.width,
+        height=probe.height,
+        size=size,
+        kind=kind,
+        quality_label=option.label,
+        thumbnail=thumbnail,
+        faststart=faststart,
+        probe=probe,
+        artist=artist,
+        source_url=url,
+    )

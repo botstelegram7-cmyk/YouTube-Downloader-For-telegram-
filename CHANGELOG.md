@@ -4,6 +4,47 @@ All notable changes to this project. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 semantic versioning for its configuration surface and behaviour.
 
+## [3.2.0] — 2026-10-12
+
+**A new download engine, and real 2 GB uploads.**
+
+### Added
+
+* **Large uploads through a Telegram user session (MTProto, Pyrofork).** The Bot API stops
+  bots at 50 MB; a user session reaches **2000 MB** per file (4000 MB on a Premium account).
+  The session uploads the file and the bot then delivers it with a server-side copy, so the
+  message is still the bot's own, carries the caption, and nothing is uploaded twice.
+  Configure with `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` and `TELEGRAM_SESSION_STRING`;
+  `scripts/make_session.py` generates the session string interactively.
+* Colour-coded quality buttons (`primary` / `success` / `danger`, Bot API 9.4). Older clients
+  ignore the field and keep rendering their usual buttons.
+* `/limits` now explains the ceiling of the transport that is actually in use, and how to
+  raise it.
+
+### Changed
+
+* **The download engine is now the TypeTube CLI** — no yt-dlp anywhere. Node.js 22.15+ is an
+  image dependency (`npm install -g typetube@1.1.4`); the CLI is driven through streamed,
+  cancellable processes and its `Completed:`/`[Error]` output is the source of truth, because
+  it always exits 0.
+* Quality buttons come from the streams TypeTube reports, preferring H.264/MP4 so the result
+  plays in Telegram; sizes are only estimated where they can be (audio).
+* Links are validated and canonicalised to YouTube before they reach the engine. The engine
+  treats unknown URLs as search queries, so `youtu.be`, `/shorts`, `/live`, `/embed`, music
+  hosts and bare video ids are all normalised, and everything else is refused with a reason.
+* `MAX_UPLOAD_MB` above what the transport can do is **clamped with a warning instead of
+  failing validation**. An unattainable ceiling used to abort a deployment; it now never takes
+  a working bot offline.
+* `MAX_DURATION_MINUTES` is enforced: longer videos are refused before anything downloads.
+* `python main.py --check` validates Node, the TypeTube CLI and the transport, and reports
+  which upload route is active.
+
+### Removed
+
+* yt-dlp, its configuration surface (`COOKIES_FILE`, `PROXY`, `YTDLP_*`, `QUALITY_LADDER`,
+  `AUDIO_FORMAT`, `ALLOW_PLAYLIST`, `PREFER_FREE_FORMATS`, `FRAGMENT_CONCURRENCY`) and the
+  SSRF guard that only existed for direct media URLs. `bot/probe.py` is gone.
+
 ## [3.0.0] — 2026-10-12
 
 **Complete rewrite in Python.** The serverless handler and the separate download worker are

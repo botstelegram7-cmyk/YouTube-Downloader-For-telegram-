@@ -9,6 +9,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from bot import texts
+from bot.qualities import build_options, find_option
 from bot.runtime import runtime
 
 log = logging.getLogger("bot.handlers.callbacks")
@@ -29,31 +30,32 @@ async def quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     token = parts[2] if len(parts) > 2 else ""
 
     rt = runtime(context)
-    info = rt.probes.get(token, user_id=user.id)
-    option = info.option(key) if info else None
+    track = rt.tracks.get(token, user_id=user.id)
+    options = build_options(track, rt.settings, upload_limit_bytes=rt.settings.upload_limit_bytes) if track else []
+    option = find_option(options, key) if track else None
 
-    if info is None or option is None:
-        await _edit(query, "⌛️ That choice has expired — send the link again and I will re-read it.")
+    if track is None or option is None:
+        await _edit(query, "⌛️ That choice has expired — send the link again and I will read it afresh.")
         return
 
-    rt.probes.drop(token)
+    rt.tracks.drop(token)
 
     await _edit(
         query,
-        f"🎯 <b>{info.title[:90]}</b>\n"
+        f"🎯 <b>{track.title[:90]}</b>\n"
         f"Quality: <b>{option.label}</b>\n"
-        f"<i>{(option.kind == 'audio' and 'Audio download') or 'Video download'} queued.</i>",
+        f"<i>{'Audio download' if option.is_audio else 'Video download'} queued.</i>",
     )
 
-    log.info("User %s chose %s for %s", user.id, option.key, info.url[:80])
+    log.info("User %s chose %s for %s", user.id, option.key, track.url[:80])
     await rt.manager.start_job(
         chat_id=chat.id,
         user_id=user.id,
-        url=info.url,
+        url=track.url,
         option=option,
-        title=info.title,
+        title=track.title,
         token=token,
-        probe=info,
+        track=track,
         reply_to_message_id=query.message.message_id if query.message else None,
     )
 
@@ -86,8 +88,8 @@ async def abort_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     token = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
     rt = runtime(context)
-    rt.probes.drop(token)
-    await _edit(query, texts.nothing_to_cancel())
+    rt.tracks.drop(token)
+    await _edit(query, texts.picker_dismissed())
 
 
 async def _edit(query, text: str) -> None:

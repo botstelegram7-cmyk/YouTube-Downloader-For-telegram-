@@ -1,7 +1,7 @@
 # Contributing
 
 Thanks for taking a look. This is a small, single-purpose project: a Telegram bot that
-downloads media with yt-dlp and delivers it playably. Keeping it small is a feature.
+downloads media with the TypeTube CLI and delivers it playably. Keeping it small is a feature.
 
 ## Contents
 
@@ -69,7 +69,7 @@ saves a round trip.
 at the top, line length 120 (ruff's rules live in `pyproject.toml`). F-strings, `pathlib`,
 `logging` with a module-level `log = logging.getLogger("bot.something")`.
 
-**No blocking calls in async code.** Anything slow (yt-dlp, FFmpeg, DNS, disk walks) goes
+**No blocking calls in async code.** Anything slow (the TypeTube CLI, FFmpeg, DNS, disk walks) goes
 through `asyncio.to_thread` or a subprocess registered in `ProcessRegistry`. This is the
 rule most likely to be broken by a well-meaning patch, and it freezes the bot for *everyone*
 when it is.
@@ -127,6 +127,6 @@ Open an issue with:
   `grep <job id>` gives you the full story,
 * `python main.py --check` output (it includes versions and the effective limits),
 * for download failures: the link, or at least the site, and whether the same link works
-  with a recent `yt-dlp` on the command line.
+  with a recent TypeTube CLI (Node 22.15+) on the command line.
 
 For security issues, please do not open a public issue — see [SECURITY.md](SECURITY.md).

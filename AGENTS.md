@@ -1,6 +1,6 @@
 # Repository guide for coding agents
 
-This repository is a **Python** Telegram bot that downloads media with yt-dlp and FFmpeg.
+This repository is a **Python** Telegram bot that downloads media with the TypeTube CLI (Node.js) and FFmpeg.
 Version 3.0.0 removed the Serverless handlers and the Node worker; nothing here is
 JavaScript any more.
 
@@ -23,7 +23,7 @@ JavaScript any more.
 - `bot/jobs.py` — `Job` + `JobManager`: one job per user, auto-cancel of the previous job,
   `Semaphore` queue, the download→mux→thumbnail→upload pipeline, cleanup, counters.
 - `bot/download.py`, `bot/upload.py`, `bot/ffmpeg.py`, `bot/probe.py`, `bot/qualities.py`,
-  `bot/progress.py`, `bot/process.py` — the engine: yt-dlp options, delivery to Telegram,
+  `bot/progress.py`, `bot/process.py` — the engine: TypeTube CLI invocation, delivery to Telegram,
   FFmpeg work, link inspection, quality options, status reporting, subprocess registry.
 - `bot/texts.py` — every user-facing string. New text goes here, never inline in handlers.
 - `scripts/e2e_local.py` — the end-to-end acceptance test (real bot, mock Bot API, real
@@ -33,7 +33,7 @@ JavaScript any more.
 
 ## Runtime boundaries (do not break these)
 
-- **Async correctness:** nothing blocking in coroutines. yt-dlp, FFmpeg, ffprobe, DNS and
+- **Async correctness:** nothing blocking in coroutines. The TypeTube CLI, FFmpeg, ffprobe, DNS and
   disk walks go through `asyncio.to_thread` or a subprocess registered in
   `ProcessRegistry`. A blocking call in a handler freezes the bot for every user.
 - **Process ownership:** every child process must be registered in `ProcessRegistry`,

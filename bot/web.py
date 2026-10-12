@@ -77,7 +77,7 @@ def create_web_app(application: Application, settings: Settings) -> web.Applicat
                 "ok": True,
                 "jobs": runtime.manager.snapshot(),
                 "counters": runtime.manager.stats(settings),
-                "cached_probes": len(runtime.probes),
+                "cached_tracks": len(runtime.tracks),
             }
         )
 

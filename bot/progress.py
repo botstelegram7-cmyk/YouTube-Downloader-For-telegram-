@@ -1,7 +1,7 @@
 """Live progress on one Telegram message, and upload-progress file reading.
 
 Telegram enforces roughly one message per second per chat, so edits are throttled
-hard. Progress arrives from yt-dlp's download thread, so every update crosses back
+hard. Progress arrives from the engine's output stream, so every update crosses back
 into the event loop with ``call_soon_threadsafe``.
 """
 
@@ -82,7 +82,7 @@ class StatusReporter:
                 log.debug("Could not edit status message: %s", exc)
 
     def update_from_thread(self, text: str) -> None:
-        """Thread-safe variant used by yt-dlp's download thread."""
+        """Thread-safe variant: safe to call from any thread or task."""
         with contextlib.suppress(RuntimeError):  # loop already closed (shutdown)
             self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.update(text)))
 

@@ -124,7 +124,7 @@ def test_thumbnail_respects_the_width_cap(tmp_path):
 
     result = asyncio.run(build())
     probe = asyncio.run(ffmpeg.probe_media(result, SETTINGS))
-    assert probe.width <= SETTINGS.thumbnail_max_side
+    assert probe.width <= 320  # Telegram rejects wider thumbnails
 
 
 def test_audio_conversion_produces_a_playable_m4a(tmp_path):
@@ -157,32 +157,3 @@ def test_ffprobe_failure_surfaces_as_an_error(tmp_path):
 
     with pytest.raises(CommandError):
         asyncio.run(ffmpeg.probe_media(junk, SETTINGS))
-
-
-def test_direct_url_inspection_reads_remote_geometry(tmp_path):
-    """ffprobe can read a URL — that is how direct links get their real size."""
-    import asyncio
-    import functools
-    import http.server
-    import socketserver
-    import threading
-
-    from bot.probe import inspect_direct_url
-
-    make_video(tmp_path)
-
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(tmp_path))
-    handler.log_message = lambda *args, **kwargs: None
-
-    with socketserver.TCPServer(("127.0.0.1", 0), handler) as server:
-        port = server.server_address[1]
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        try:
-            details = asyncio.run(inspect_direct_url(f"http://127.0.0.1:{port}/fast.mp4", SETTINGS))
-        finally:
-            server.shutdown()
-
-    assert details is not None
-    assert details["height"] == 240 and details["width"] == 320
-    assert details["vcodec"] != "none" and details["acodec"] != "none"
-    assert details["filesize"] > 1000

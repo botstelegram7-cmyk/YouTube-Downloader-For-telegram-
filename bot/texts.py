@@ -1,126 +1,133 @@
-"""Every user-facing string lives here, so the bot's voice stays consistent."""
+"""Every user-facing string lives here, so the bot's voice stays consistent.
+
+House style: short lines, an emoji that carries meaning rather than decoration, figures
+bolded, and never a promise the code does not keep (sizes and limits especially).
+"""
 
 from __future__ import annotations
 
 from bot.utils import html_escape as esc
-from config import LOCAL_UPLOAD_LIMIT_MB
+from config import MT_UPLOAD_LIMIT_MB
 
 COMMANDS: tuple[tuple[str, str], ...] = (
-    ("start", "Show the welcome screen and feature list"),
+    ("start", "Welcome screen and shortcuts"),
     ("help", "How to use the bot, step by step"),
     ("status", "What is running now, plus limits and versions"),
     ("cancel", "Stop your download, conversion and upload"),
     ("limits", "Why files are capped and how to raise the cap"),
-    ("id", "Show your chat id (for STARTUP_NOTIFY_CHAT_ID)"),
+    ("id", "Show your chat id (for OWNER_USER_ID)"),
     ("about", "Version, engine and credits"),
 )
 
 
 def banner(name: str, version: str, settings_summary: dict) -> str:
     """Console introduction printed when the process starts."""
+    mode = settings_summary.get("mode")
     lines = [
         "",
-        "═" * 62,
-        f"  {name}  ·  v{version}".ljust(62),
-        "═" * 62,
-        f"  API        : {settings_summary.get('api_mode')} ({settings_summary.get('api_base')})",
-        f"  Upload cap : {settings_summary.get('upload_limit_mb')} MB"
-        f"  (Telegram limit for this API: {settings_summary.get('api_upload_cap_mb')} MB)",
-        f"  Mode       : {settings_summary.get('mode')}"
-        + (f" → {settings_summary.get('webhook_url')}" if settings_summary.get("mode") == "webhook" else ""),
-        f"  Engines    : yt-dlp + FFmpeg ({settings_summary.get('ffmpeg')})",
+        "═" * 64,
+        f"  {name}  ·  v{version}".ljust(64),
+        "═" * 64,
+        f"  Engine     : {settings_summary.get('engine')} ({settings_summary.get('typetube_host')})",
+        f"  Telegram   : {settings_summary.get('api_mode')} ({settings_summary.get('api_base')})",
+        f"  Upload cap : {settings_summary.get('upload_limit_mb')} MB  (via {_transport_label(settings_summary)})",
+        f"  Mode       : {mode}" + (f" → {settings_summary.get('webhook_url')}" if mode == "webhook" else ""),
+        f"  FFmpeg     : {settings_summary.get('ffmpeg')}",
         f"  Parallel   : {settings_summary.get('max_concurrent_jobs')} job(s)"
         f"  ·  default quality {settings_summary.get('default_quality')}",
         f"  Downloads  : {settings_summary.get('download_dir')}",
-        "═" * 62,
+        "═" * 64,
         "",
     ]
     return "\n".join(lines)
+
+
+def _transport_label(summary: dict) -> str:
+    """How big files will travel, in words."""
+    if summary.get("upload_transport") == "mtproto":
+        cap = summary.get("mtproto_cap_mb") or 0
+        return f"Telegram session (MTProto), up to {cap} MB"
+    if (summary.get("api_upload_cap_mb") or 0) > 50:
+        return f"local Bot API server, up to {summary.get('api_upload_cap_mb')} MB"
+    return "cloud Bot API, up to 50 MB"
 
 
 def welcome(name: str, version: str) -> str:
     """``/start`` — the introduction users see first."""
     return (
         f"👋 <b>Welcome to {esc(name)}</b>\n"
-        f"<i>v{esc(version)} · powered by yt-dlp and FFmpeg</i>\n"
+        f"<i>v{esc(version)} · TypeTube engine · FFmpeg delivery</i>\n"
         "\n"
-        "Send me a video link and I will show you the qualities that link actually offers, "
-        "download the one you pick, and deliver a playable file with a thumbnail and a clean caption.\n"
+        "Send a YouTube link and I will show you the qualities that video really has, "
+        "download the one you pick and send it back as a <b>playable video</b>.\n"
         "\n"
-        "<b>What I can send</b>\n"
-        "• 🎬 Playable video (MP4, streaming-friendly, thumbnail attached)\n"
-        "• 🎵 Audio only, as M4A/MP3 with title and artist tags\n"
-        "• 📄 A plain document when a video container is refused\n"
+        "<b>What you get</b>\n"
+        "• 🎬 MP4 with sound, thumbnail and a clean caption\n"
+        "• 🎵 Audio only, as M4A\n"
+        "• ⚡️ Downloads run on parallel range workers, so no throttling\n"
         "\n"
-        "<b>One request at a time</b>\n"
-        "Send another link and I cancel the previous job for you automatically — no orphaned "
-        "downloads, no wasted disk.\n"
+        "<b>Good to know</b>\n"
+        "• One download at a time — a new link replaces the running one\n"
+        "• <code>/cancel</code> stops everything instantly\n"
+        "• Buttons are colour-coded: green is recommended, red cancels\n"
     )
 
 
 def help_text() -> str:
-    """/help — the step-by-step usage guide."""
     return (
         "📖 <b>How to use this bot</b>\n"
         "\n"
         "<b>1 · Send a link</b>\n"
-        "Paste a supported media URL (YouTube, Shorts, and the 1000+ other sites yt-dlp "
-        "knows). I read the link's real formats first — nothing is downloaded yet.\n"
+        "Paste any YouTube link — <code>youtube.com/watch</code>, <code>youtu.be</code>, "
+        "<code>/shorts</code>, <code>/live</code> or just the 11-character video id.\n"
         "\n"
         "<b>2 · Pick a quality</b>\n"
-        "You get inline buttons for the qualities that link <i>actually</i> has, each with an "
-        "estimated size, plus <b>Best</b> and <b>Audio only</b> when they are available.\n"
+        "I list the qualities that video actually has, from 144p up to its maximum, and mark "
+        "the best one in green. Audio-only is one tap away when you want just the sound.\n"
         "\n"
-        "<b>3 · Watch it happen</b>\n"
-        "The status message shows live download, conversion and upload progress, then becomes "
-        "the finished file.\n"
+        "<b>3 · Wait for the file</b>\n"
+        "A status message shows download, mux and upload progress, with a red "
+        "<b>Cancel download</b> button the whole time.\n"
         "\n"
-        "<b>Controls</b>\n"
-        "• /cancel — stop everything for you and clean up\n"
-        "• /status — what is running, queue, limits, versions\n"
-        "• /limits — the file-size ceiling and how to raise it\n"
+        "<b>Tips</b>\n"
+        "• <code>/status</code> — what is running, plus limits and versions\n"
+        "• <code>/limits</code> — why there is a size cap and how to raise it\n"
+        "• Videos are streamed by Telegram: play them while they download\n"
         "\n"
-        "<b>Good to know</b>\n"
-        "• Send a new link any time — the previous job for you is cancelled first\n"
-        "• Filenames come from the video title; nothing is kept after upload\n"
-        "• Age-restricted or members-only videos need a cookies file on the server\n"
+        "<i>Weaker connections: pick a lower quality — it finishes faster and still plays.</i>"
     )
 
 
-def about_text(version: str) -> str:
+def about_text(version: str, engine: str = "TypeTube") -> str:
     return (
-        f"ℹ️ <b>YouTube Downloader for Telegram</b>\n"
-        f"Version <code>{esc(version)}</code>\n"
+        "ℹ️ <b>About</b>\n"
         "\n"
-        "<b>Engine</b>: yt-dlp (extraction and download), FFmpeg (muxing, faststart, "
-        "thumbnails, audio conversion)\n"
-        "<b>Framework</b>: python-telegram-bot, asyncio\n"
-        "<b>Storage</b>: temporary only — files are deleted right after upload\n"
+        f"<b>Version</b>: {esc(version)}\n"
+        f"<b>Engine</b>: {esc(engine)}\n"
+        "<b>Delivery</b>: FFmpeg mux, faststart, thumbnail, streaming video\n"
+        "<b>Built with</b>: python-telegram-bot, TypeTube, FFmpeg\n"
         "\n"
-        "Report a problem with /help and the exact link you used."
+        "<i>Only download what you own or are allowed to save.</i>"
     )
 
 
 def commands_list() -> str:
-    from bot.utils import html_escape
-
     width = max(len(cmd) for cmd, _ in COMMANDS)
-    rows = "\n".join(f"/{cmd.ljust(width)}  {html_escape(text)}" for cmd, text in COMMANDS)
+    rows = "\n".join(f"/{cmd.ljust(width)}  {esc(text)}" for cmd, text in COMMANDS)
     return f"<b>Commands</b>\n<pre>{rows}</pre>"
 
 
 def startup_report(version: str, summary: dict, warnings: list[str]) -> str:
-    """Sent to ``STARTUP_NOTIFY_CHAT_ID`` when the bot comes online."""
+    """Sent to the notify chat when the bot comes online."""
     lines = [
         "🚀 <b>Bot online</b>",
         f"<i>v{esc(version)}</i>",
         "",
-        f"<b>API</b>: {esc(str(summary.get('api_mode')))}",
-        f"<b>Upload cap</b>: {summary.get('upload_limit_mb')} MB"
-        f" (Telegram allows {summary.get('api_upload_cap_mb')} MB here)",
+        f"<b>Engine</b>: {esc(str(summary.get('engine')))}",
+        f"<b>Telegram API</b>: {esc(str(summary.get('api_mode')))}",
+        f"<b>Upload cap</b>: {summary.get('upload_limit_mb')} MB · {esc(_transport_label(summary))}",
         f"<b>Mode</b>: {esc(str(summary.get('mode')))}",
         f"<b>Jobs in parallel</b>: {summary.get('max_concurrent_jobs')}",
-        f"<b>Default quality</b>: {esc(str(summary.get('default_quality')))}",
     ]
     if warnings:
         lines += ["", "⚠️ <b>Notes</b>"]
@@ -130,46 +137,46 @@ def startup_report(version: str, summary: dict, warnings: list[str]) -> str:
 
 
 def analyzing(url: str) -> str:
-    return f"🔎 Reading available formats…\n<code>{esc(url)}</code>"
+    return "🔍 <b>Reading the link…</b>\n<i>Resolving streams with TypeTube.</i>"
 
 
-def choose_quality(title: str, duration: str, size_limit_mb: int) -> str:
-    return (
-        f"🎯 <b>{esc(title)}</b>\n"
-        f"⏱ {duration} · pick a quality below\n"
-        f"\n<i>Files above {size_limit_mb} MB cannot be sent through the current API.</i>"
-    )
+def choose_quality(title: str, duration: str, uploader: str, limit_mb: int, *, replaces_running: bool = False) -> str:
+    header = "♻️ <i>Your running download is replaced when you pick.</i>\n\n" if replaces_running else ""
+    lines = [
+        header + f"🎬 <b>{esc(title[:90])}</b>",
+    ]
+    if uploader:
+        lines.append(f"📺 {esc(uploader[:60])}")
+    lines.append(f"⏱ {esc(duration)}  ·  ⬆️ up to <b>{limit_mb} MB</b> per file")
+    lines.append("")
+    lines.append("<i>Pick a quality — green is the best available.</i>")
+    return "\n".join(lines)
 
 
 def job_started(title: str, quality: str) -> str:
-    return f"⬇️ <b>{esc(title)}</b>\nDownloading <b>{esc(quality)}</b>…"
+    return f"⬇️ <b>Starting</b>\n<i>{esc(title[:80])}</i>\n<b>{esc(quality)}</b>"
 
 
 def progress_text(
-    *,
     title: str,
     quality: str,
     phase: str,
-    percent: float | None,
+    percent: float,
     bar: str,
-    size_line: str,
-    speed: str,
-    eta: str,
+    *,
+    detail: str = "",
+    eta: str = "",
 ) -> str:
-    """Live status message while a job runs."""
-    head = {
-        "download": "⬇️ <b>Downloading</b>",
-        "convert": "🎛 <b>Converting</b>",
-        "upload": "⬆️ <b>Uploading to Telegram</b>",
-        "prepare": "🧰 <b>Preparing</b>",
-    }.get(phase, "⏳ <b>Working</b>")
-
-    lines = [f"{head} — {esc(quality)}", f"<i>{esc(title)}</i>", ""]
-    if percent is None:
-        lines.append(f"{bar}  <b>{esc(size_line)}</b>")
-    else:
-        lines.append(f"{bar}  <b>{percent:.1f}%</b>  ·  {esc(size_line)}")
-        lines.append(f"⚡ {speed}  ·  ⏳ ETA {eta}")
+    lines = [
+        f"{phase} — <b>{esc(quality)}</b>",
+        f"<i>{esc(title[:70])}</i>",
+        "",
+        f"<code>{bar}</code> <b>{percent:5.1f}%</b>",
+    ]
+    if detail:
+        lines.append(detail)
+    if eta and eta != "—":
+        lines.append(f"⏳ {esc(eta)} remaining")
     return "\n".join(lines)
 
 
@@ -183,114 +190,176 @@ def done_caption(
     url: str,
     kind: str = "video",
 ) -> str:
-    """Caption attached to the delivered file."""
-    icon = {"video": "🎬", "audio": "🎵", "document": "📄"}.get(kind, "📦")
-    details = [quality]
-    if resolution and kind == "video":
-        details.append(resolution)
-    details.append(duration)
-    details.append(size)
-    return f"{icon} <b>{esc(title)}</b>\n🎚 {' · '.join(esc(part) for part in details)}\n🔗 {esc(url)}"
+    icon = "🎵" if kind == "audio" else "🎬"
+    lines = [
+        f"{icon} <b>{esc(title[:150])}</b>",
+        f"🎚 {esc(quality)}"
+        + (f"  ·  {esc(resolution)}" if resolution else "")
+        + f"  ·  {esc(duration)}  ·  {esc(size)}",
+    ]
+    if url:
+        lines.append(f'🔗 <a href="{esc(url)}">Source</a>')
+    return "\n".join(lines)
 
 
-def too_large(size_mb: float, limit_mb: int, *, local_api: bool) -> str:
-    if local_api:
-        advice = "Pick a lower quality, or trim the video length."
+def too_large(size_mb: float, summary: dict) -> str:
+    """The refusal message when a finished file is simply too big for this setup."""
+    limit = summary.get("upload_limit_mb")
+    transport = summary.get("upload_transport")
+
+    if transport == "mtproto":
+        advice = (
+            f"Even the MTProto session tops out at {summary.get('upload_cap_mb')} MB per file (Telegram's own "
+            "ceiling for accounts). Try a lower quality or an audio-only download."
+        )
     else:
         advice = (
-            "Pick a lower quality. To send files this big, run a local Bot API server "
-            "(docs/DEPLOYMENT.md → “Larger than 50 MB”) and point TELEGRAM_API_BASE at it."
+            "Pick a lower quality, or enable big uploads: get <code>api_id</code>/<code>api_hash</code> from "
+            "https://my.telegram.org, run <code>python scripts/make_session.py</code> once, then set "
+            "<code>TELEGRAM_API_ID</code>, <code>TELEGRAM_API_HASH</code> and "
+            f"<code>TELEGRAM_SESSION_STRING</code> — that raises the cap to "
+            f"{summary.get('mtproto_cap_mb') or MT_UPLOAD_LIMIT_MB} MB."
         )
+
     return (
-        f"⚠️ <b>That file is too large</b>\n"
-        f"The result would be about <b>{size_mb:.0f} MB</b>, and this bot can send up to "
-        f"<b>{limit_mb} MB</b>.\n\n{advice}"
+        "⚠️ <b>Too large to send</b>\n"
+        f"The result would be about <b>{size_mb:.0f} MB</b> and this bot can send <b>{limit} MB</b>.\n\n{advice}"
     )
 
 
 def cancelled() -> str:
-    return "🛑 <b>Cancelled.</b>\nStopped your download, conversion and upload, and cleaned up the files."
+    return "🛑 <b>Cancelled.</b>\nStopped the download, the muxing and the upload, and removed the files."
 
 
 def nothing_to_cancel() -> str:
     return "Nothing is running for you right now."
 
 
+def picker_dismissed() -> str:
+    return "👍 Dismissed. Send another link whenever you like."
+
+
 def replaced_previous(title: str) -> str:
-    return f"♻️ Cancelled your previous request to start <b>{esc(title)}</b>."
+    return f"♻️ Cancelled your previous request to start <b>{esc(title[:70])}</b>."
 
 
-def probe_failed(url: str, reason: str) -> str:
+def not_youtube(host: str) -> str:
     return (
-        "😕 <b>I could not read that link</b>\n"
-        f"<code>{esc(url)}</code>\n\n"
-        f"<i>{esc(reason)}</i>\n\n"
-        "• Check that the link opens in a browser\n"
-        "• Private, members-only and age-restricted videos need a cookies file on the server\n"
-        "• Some sites block datacentre IP addresses"
+        "🤔 <b>That link is not from YouTube</b>\n"
+        f"<i>{esc(host)}</i>\n\n"
+        "This bot downloads with the TypeTube engine, which serves YouTube only.\n"
+        "Send a <code>youtube.com</code>, <code>youtu.be</code>, <code>/shorts</code> or "
+        "<code>/live</code> link."
     )
 
 
 def not_supported(text: str) -> str:
     return (
-        "🤔 <b>That does not look like a link</b>\n"
-        "Send an http(s) link to a video, a Short, or an audio track.\n"
-        f"\n<i>{esc(text[:180])}</i>"
+        "🔗 <b>Send me a YouTube link</b>\n"
+        "Paste a video URL (<code>youtube.com/watch?v=…</code>, <code>youtu.be/…</code>, a Short or a live link) "
+        "or an 11-character video id.\n"
+        f"\n<i>{esc(text[:120])}</i>"
     )
 
 
-def blocked_url(reason: str) -> str:
-    return f"🚫 <b>That link is not allowed</b>\n<i>{esc(reason)}</i>"
-
-
-def no_formats() -> str:
+def resolve_failed(url: str, reason: str) -> str:
     return (
-        "😕 <b>No downloadable formats</b>\n"
-        "The site reported no media streams for that link — it may be a live stream, "
-        "a text page, or a page that needs a login."
+        "😕 <b>I could not read that video</b>\n"
+        f"<i>{esc(reason)}</i>\n\n"
+        "• Check that the video plays in a browser\n"
+        "• Private, age-restricted or region-locked videos cannot be resolved\n"
+        "• If it keeps failing, the TypeTube cluster may be busy — try again in a minute"
     )
 
 
-def limits_text(limit_mb: int, cap_mb: int, api_mode: str) -> str:
-    if api_mode == "cloud Bot API":
+def no_streams() -> str:
+    return (
+        "😕 <b>No downloadable streams</b>\n"
+        "That video reported no usable video or audio track — it may be a live stream that just started, "
+        "a premiere, or a page that needs a sign-in."
+    )
+
+
+def too_long(duration: float, limit_minutes: int) -> str:
+    """``MAX_DURATION_MINUTES`` refused this video before anything was downloaded."""
+    from bot.utils import human_duration
+
+    return (
+        "⏱ <b>That video is too long</b>\n"
+        f"It runs for <b>{esc(human_duration(duration))}</b> and this bot accepts up to "
+        f"<b>{limit_minutes} min</b>.\n\n"
+        "<i>An operator can raise MAX_DURATION_MINUTES if the server has room.</i>"
+    )
+
+
+def limits_text(summary: dict) -> str:
+    """``/limits`` — the honest number, and the way to raise it."""
+    limit = summary.get("upload_limit_mb")
+    transport = summary.get("upload_transport")
+    cap = summary.get("upload_cap_mb") or limit
+
+    if transport == "mtproto":
         how = (
-            f"Currently <b>{limit_mb} MB</b> — Telegram's standard limit for bots.\n\n"
-            "<b>How to raise it</b>\n"
-            "1 · Get <code>api_id</code>/<code>api_hash</code> from https://my.telegram.org\n"
-            "2 · Run the official <code>telegram-bot-api</code> server with <code>--local</code>\n"
-            f"3 · Point <code>TELEGRAM_API_BASE</code> at it (that lifts the cap to {LOCAL_UPLOAD_LIMIT_MB} MB)\n"
-            "\nFull walkthrough, including the docker-compose file that does all three: "
-            "<code>docs/DEPLOYMENT.md</code>."
+            f"Large files are sent through a <b>Telegram user session</b> (MTProto), because the Bot API stops at "
+            f"{summary.get('api_upload_cap_mb')} MB. This account can upload <b>{cap} MB</b> per file — Telegram's "
+            "ceiling is 2000 MB, or 4000 MB with Premium.\n\n"
+            f"<i>Files up to {summary.get('api_upload_cap_mb')} MB are still delivered straight through the Bot API, "
+            "which is faster.</i>"
+        )
+    elif (summary.get("api_upload_cap_mb") or 0) > 50:
+        how = (
+            f"This bot talks to a <b>self-hosted Bot API server</b>, so files up to <b>{cap} MB</b> can be sent — "
+            "Telegram's ceiling for bots.\n\n"
+            "<i>Premium's 4 GB applies to people uploading in the app, not to bots: to go beyond 2000 MB, add a "
+            "Premium user session instead.</i>"
         )
     else:
         how = (
-            f"Currently <b>{limit_mb} MB</b> — your local Bot API server supports the same "
-            f"{cap_mb} MB ceiling Telegram allows.\n"
-            "Files are uploaded straight through it, so nothing is truncated."
+            f"Currently <b>{limit} MB</b> — the ceiling for bots on Telegram's cloud API.\n\n"
+            "<b>How to raise it</b>\n"
+            "1 · Get <code>api_id</code> / <code>api_hash</code> from https://my.telegram.org\n"
+            "2 · Run <code>python scripts/make_session.py</code> once to log in\n"
+            "3 · Set <code>TELEGRAM_API_ID</code>, <code>TELEGRAM_API_HASH</code> and "
+            "<code>TELEGRAM_SESSION_STRING</code>\n\n"
+            "Result: up to <b>2000 MB</b> per file, 4000 MB if that account has Premium.\n"
+            "<i>The alternative is a self-hosted Bot API server (<code>TELEGRAM_API_BASE</code>).</i>"
         )
-    return f"📦 <b>File size limit</b>\n\n{how}"
+
+    return (
+        "📦 <b>Size limits</b>\n\n"
+        f"<b>Upload cap</b>: {limit} MB\n"
+        f"<b>Transport</b>: {esc(_transport_label(summary))}\n\n"
+        f"{how}\n\n"
+        "<b>Why a cap at all?</b>\n"
+        "Every file is downloaded, muxed and uploaded through this server; the cap keeps a single request from "
+        "filling its disk."
+    )
 
 
 def status_text(summary: dict, active: list[str], free_disk: str) -> str:
     lines = [
         "📊 <b>Status</b>",
         "",
-        f"<b>Mode</b>: {esc(str(summary.get('mode')))}",
-        f"<b>API</b>: {esc(str(summary.get('api_mode')))}",
-        f"<b>Upload cap</b>: {summary.get('upload_limit_mb')} MB",
+        f"<b>Engine</b>: {esc(str(summary.get('engine')))}",
+        f"<b>Upload cap</b>: {summary.get('upload_limit_mb')} MB · {esc(_transport_label(summary))}",
         f"<b>Parallel jobs</b>: {summary.get('max_concurrent_jobs')}",
-        f"<b>Free disk</b>: {free_disk}",
+        f"<b>Free disk</b>: {esc(free_disk)}",
+        f"<b>Mode</b>: {esc(str(summary.get('mode')))}",
     ]
     if active:
-        lines += ["", "<b>Running for you</b>"] + [f"• {esc(item)}" for item in active]
+        lines += ["", "<b>Running now</b>"] + [f"• {esc(item)}" for item in active]
     else:
-        lines += ["", "You have nothing running."]
+        lines += ["", "<i>Nothing running.</i>"]
     return "\n".join(lines)
 
 
 def job_failed(reason: str) -> str:
-    return f"❌ <b>That did not work</b>\n\n{esc(reason)}"
+    return f"❌ <b>That download failed</b>\n\n{esc(reason)}"
 
 
 def unsupported_runtime(reason: str) -> str:
-    return f"⚙️ <b>Missing a system dependency</b>\n\n{esc(reason)}"
+    return (
+        "🛠 <b>The server is not ready</b>\n"
+        f"{esc(reason)}\n\n"
+        "<i>An operator needs to fix this — the bot itself is running.</i>"
+    )

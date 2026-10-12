@@ -6,7 +6,7 @@ import logging
 import sys
 
 _LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-_NOISY = ("httpx", "httpcore", "telegram.ext.Application", "telegram.request", "yt_dlp", "asyncio")
+_NOISY = ("httpx", "httpcore", "telegram.ext.Application", "telegram.request", "asyncio")
 
 
 def setup_logging(level: str = "INFO", *, pretty: bool = True) -> logging.Logger:

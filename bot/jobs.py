@@ -7,8 +7,8 @@ Rules this module enforces:
 * ``/cancel`` stops the download, the conversion and the upload for that user.
 * Every job owns a temporary directory that is removed when it ends, whatever
   the outcome.
-* Cancellation is cooperative for yt-dlp (the progress hook raises) and forceful
-  for FFmpeg (SIGTERM, then SIGKILL).
+* Cancellation reaches the TypeTube CLI and its range workers through the job's
+  process registry (SIGTERM, then SIGKILL), and every extraction is wrapped in a timeout.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -33,14 +34,15 @@ from bot.errors import (
     MissingDependency,
     ProbeError,
     TooLargeError,
+    UploadCancelled,
     UploadError,
 )
 from bot.keyboards import cancel_keyboard, retry_keyboard
-from bot.probe import MediaInfo
 from bot.process import ProcessRegistry
 from bot.progress import StatusReporter
-from bot.qualities import QualityOption
+from bot.qualities import QualityOption, build_options, smaller_video_options
 from bot.texts import cancelled as cancelled_text
+from bot.typetube import Track
 from bot.upload import send_media
 from bot.utils import (
     disk_free_bytes,
@@ -76,7 +78,7 @@ class Job:
     title: str
     token: str = ""
     reply_to_message_id: int | None = None
-    probe: MediaInfo | None = None
+    track: Track | None = None
     status: StatusReporter | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -108,9 +110,10 @@ class Job:
 class JobManager:
     """Owns every running job: start, cancel, report, clean up."""
 
-    def __init__(self, settings: Settings, bot: Bot) -> None:
+    def __init__(self, settings: Settings, bot: Bot, uploader=None) -> None:
         self.settings = settings
         self.bot = bot
+        self.uploader = uploader
         self._jobs: dict[int, Job] = {}
         self._lock = asyncio.Lock()
         self._slots = asyncio.Semaphore(max(1, settings.max_concurrent_jobs))
@@ -161,7 +164,7 @@ class JobManager:
         option: QualityOption,
         title: str,
         token: str = "",
-        probe: MediaInfo | None = None,
+        track: Track | None = None,
         reply_to_message_id: int | None = None,
         status_message=None,
     ) -> Job:
@@ -179,7 +182,7 @@ class JobManager:
                 option=option,
                 title=title,
                 token=token,
-                probe=probe,
+                track=track,
                 reply_to_message_id=reply_to_message_id,
             )
             if status_message is not None:
@@ -249,7 +252,7 @@ class JobManager:
         except asyncio.CancelledError:
             # _cancel() has already cleaned up and closed the status message.
             log.info("Job %s stopped", job.id)
-        except DownloadCancelled:
+        except (DownloadCancelled, UploadCancelled):
             self.cancelled += 1
             await self._finish_error(job, cancelled_text())
         except TooLargeError as exc:
@@ -307,6 +310,8 @@ class JobManager:
                 reporter=job.status,
                 reply_to_message_id=job.reply_to_message_id,
                 source_url=job.url,
+                uploader=self.uploader,
+                cancel_event=job.cancel_event,
             )
             job.result = result
             log.info(
@@ -329,6 +334,7 @@ class JobManager:
             return await download_media(
                 url=job.url,
                 option=job.option,
+                track=job.track,
                 dest_dir=job.temp_dir,
                 settings=self.settings,
                 on_progress=progress,
@@ -345,7 +351,7 @@ class JobManager:
             ) from exc
 
     def _progress_callback(self, job: Job):
-        """Render progress updates; called from yt-dlp's download thread."""
+        """Render progress updates; called from the CLI's output stream."""
         state = {"started": time.monotonic(), "phase": job.phase, "last": 0.0}
 
         def callback(update: ProgressUpdate) -> None:
@@ -396,28 +402,20 @@ class JobManager:
             return
 
         reply_markup = None
-        if job.probe is not None:
-            smaller = [
-                option
-                for option in job.probe.options
-                if option.kind == "video" and (option.height or 0) < (job.option.height or 0)
-            ]
-            smaller.sort(key=lambda option: option.height or 0, reverse=True)
+        if job.track is not None:
+            options = build_options(job.track, self.settings, upload_limit_bytes=self.settings.upload_limit_bytes)
+            smaller = smaller_video_options(options, job.option)
             if smaller and job.token:
                 reply_markup = retry_keyboard(smaller, job.token)
 
         await job.status.finish(text, reply_markup=reply_markup)
 
     async def _finish_too_large(self, job: Job, error: TooLargeError) -> None:
-        text = texts.too_large(
-            size_mb=error.size_bytes / 1024 / 1024,
-            limit_mb=error.limit_mb,
-            local_api=self.settings.uses_local_api,
-        )
+        text = texts.too_large(error.size_bytes / 1024 / 1024, self.settings.summary())
         await self._finish_error(job, text)
 
     async def _cleanup(self, job: Job) -> None:
-        if self.settings.keep_failed_files and job.error:
+        if os.getenv("KEEP_FAILED_FILES", "").lower() in ("1", "true", "yes") and job.error:
             log.info("Keeping files for failed job %s at %s", job.id, job.temp_dir)
             job.temp_dir = None
             return

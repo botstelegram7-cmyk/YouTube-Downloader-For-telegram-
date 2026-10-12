@@ -5,9 +5,10 @@
 # limits (30 messages/second globally, ~1 per second per chat).
 python-telegram-bot[rate-limiter]==22.8
 
-# Media extraction and download. yt-dlp is the engine: it knows 1000+ sites,
-# reads the available formats, and drives FFmpeg for muxing.
-yt-dlp>=2026.8.19
+# MTProto user session: the route to Telegram's 2000 MB per-file upload limit
+# (4000 MB with Premium). Pyrofork is the maintained Pyrogram fork, imported as
+# `pyrogram`. Downloading is done by the TypeTube CLI, not by Python.
+pyrofork>=2.3.69,<2.4
 
 # HTTP server for the webhook + /health endpoint of the Web Service deployment.
 aiohttp>=3.10,<4

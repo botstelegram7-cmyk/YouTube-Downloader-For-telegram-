@@ -1,7 +1,7 @@
 [project]
 name = "youtube-telegram-downloader"
 version = "3.0.0"
-description = "Telegram bot that downloads media with yt-dlp and delivers playable video"
+description = "Telegram bot that downloads media with the TypeTube engine and delivers playable video"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 

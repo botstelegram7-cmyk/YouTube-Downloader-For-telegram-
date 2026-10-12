@@ -1,6 +1,6 @@
 # Deployment guide
 
-The bot is a single Python web service: FFmpeg, yt-dlp and python-telegram-bot inside one
+The bot is a single Python web service: FFmpeg, Node.js (the TypeTube engine) and python-telegram-bot inside one
 container. Nothing else is needed — there is no worker, no database and no serverless
 account.
 
@@ -12,7 +12,7 @@ This guide walks through every supported route, in the order most people want th
    - [3a. Render (blueprint, one click)](#3a-render-blueprint-one-click)
    - [3b. Voroa](#3b-voroa)
    - [3c. Any Docker host (Fly.io, Railway, a VPS)](#3c-any-docker-host)
-4. [Step 4 — Uploads larger than 50 MB (the local Bot API server)](#step-4--uploads-larger-than-50-mb-the-local-bot-api-server)
+4. [Step 4 — Uploads larger than 50 MB (a Telegram user session)](#step-4--uploads-larger-than-50-mb-a-telegram-user-session)
 5. [Step 5 — Age-restricted or sign-in-only videos (cookies)](#step-5--age-restricted-or-sign-in-only-videos-cookies)
 6. [Step 6 — Keep a free instance awake](#step-6--keep-a-free-instance-awake)
 7. [Step 7 — Day-two operations](#step-7--day-two-operations)
@@ -64,7 +64,7 @@ python main.py                  # no WEBHOOK_URL set → long polling, no ports 
 
 Send a link; press a quality button; watch the status message. `Ctrl+C` stops it cleanly.
 
-If you have Docker, the same thing with one line — including the local Bot API server so
+If you have Docker, the same thing with one line — including the user session so
 uploads may reach 2000 MB:
 
 ```bash
@@ -146,77 +146,66 @@ less snappy but works from a home network or a container with no ingress.
 
 ---
 
-## Step 4 — Uploads larger than 50 MB (the local Bot API server)
+## Step 4 — Uploads larger than 50 MB (a Telegram user session)
 
-This is the only way to go past 50 MB, and the repository already supports it: the bot
-detects that `TELEGRAM_API_BASE` points somewhere other than `api.telegram.org`, switches
-this API's ceiling to **2000 MB**, and says so in the startup banner and in `/limits`.
+Telegram lets a **bot** upload only 50 MB per file. A **user account** may upload 2000 MB
+(4000 MB with Premium) — so the bot uploads through your account and then hands the file to
+the user with a server-side copy, which is why the message still comes from the bot.
 
-Telegram's own server is what lifts the limit — a self-hosted Bot API server started with
-`--local`. `docker-compose.yml` runs it next to the bot:
+Nothing extra needs hosting. You need three values:
 
-```bash
-cp .env.example .env
-# .env needs:
-#   BOT_TOKEN=123456:ABC...
-#   TELEGRAM_API_ID=12345            ← https://my.telegram.org → API development tools
-#   TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
-#   WEBHOOK_URL=https://bot.example.com    (only if you want webhook mode)
-docker compose up -d --build
+```dotenv
+TELEGRAM_API_ID=1234567
+TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
+TELEGRAM_SESSION_STRING=BQ...
 ```
 
-What the two containers do:
+1. `api_id` / `api_hash` come from [my.telegram.org](https://my.telegram.org) → *API
+   development tools*. They are personal credentials — as sensitive as the bot token.
+2. Generate the session string **on your own machine**, once, because it needs a login code:
 
-| Service | Role |
-|---|---|
-| `telegram-bot-api` | Telegram's official server (`aiogram/telegram-bot-api` image) with `TELEGRAM_LOCAL=1`, i.e. `--local`. It accepts uploads up to 2000 MB and serves the files to Telegram itself. |
-| `bot` | The bot, with `TELEGRAM_API_BASE=http://telegram-bot-api:8081`, so *every* API call goes through the local server. |
+   ```bash
+   python scripts/make_session.py
+   ```
 
-Requirements and caveats, honestly:
+   It signs in, prints the session string, and tells you whether that account has Premium
+   (which decides between 2000 MB and 4000 MB).
+3. Put all three into the service's environment and restart. The startup banner and `/limits`
+   then report the session's ceiling, and the log line `Large uploads enabled: session on
+   account …` confirms it connected.
 
-* **`TELEGRAM_API_ID` / `TELEGRAM_API_HASH`** are personal API credentials from
-  [my.telegram.org](https://my.telegram.org) — a phone number login, not the bot token.
-  They are what allows *you* to run a server against Telegram's API. They are as sensitive
-  as the token.
-* **Disk.** The server spools each upload to disk before sending it; budget about twice the
-  largest file you plan to deliver (2000 MB file → ~4 GB of scratch space).
-* **CPU and RAM.** A 2 GB upload through a 512 MB free tier instance will not end well.
-  Use a host with real resources if you intend to use the ceiling.
-* **A public host that can also reach Telegram.** The local server must reach
-  `api.telegram.org` itself and, when the bot is in webhook mode, Telegram must reach the
-  bot. Compose on a laptop → leave `WEBHOOK_URL` empty and use polling.
-* **Migrating back.** If you point the bot back at the cloud API while the local server is
-  running, log in again with `/setwebhook`-style flows; Telegram treats the two API
-  identities separately (different `getMe` sessions). In practice: pick one and stay there.
-* **Without this server, the ceiling is 50 MB and the bot tells you so** — it never pretends
-  otherwise. `MAX_UPLOAD_MB` can only *lower* the ceiling, never raise it past what the API
-  in front of the bot allows.
+Practical notes:
 
----
+* **Use a dedicated account** if you can — uploads are stored in that account's chat with the
+  bot, and are deleted again as soon as the user's copy is delivered.
+* **The session is a full login.** Anyone holding it can use that account; revoke it from
+  Telegram → *Settings → Devices* and generate a new one if it leaks.
+* **`STORAGE_CHAT_ID`** (optional) parks uploads in a specific chat — for example a private
+  channel where both the account and the bot are members — instead of the bot's chat.
+* **Disk.** Each job needs room for the file plus its remux; a 2 GB delivery needs a
+  correspondingly roomy workspace and RAM to match.
+* **Rate limits.** A brand-new session uploading gigabytes on its first day may be asked to
+  wait (`FLOOD_WAIT`). The bot reports that plainly instead of retrying in a loop.
 
-## Step 5 — Age-restricted or sign-in-only videos (cookies)
+### Alternative: a self-hosted Bot API server
 
-Some videos require an account. Export cookies in Netscape format from a browser you are
-logged in with (any "export cookies" extension produces this format), then:
+If you would rather keep every request on the Bot API, run Telegram's own server with
+`--local` and point `TELEGRAM_API_BASE` at it — the ceiling then becomes 2000 MB and **all**
+API calls go through it. `docker-compose.yml` can do this for you (`docker compose --profile
+local-api up -d --build`); it costs a second container and roughly twice the largest file in
+scratch space. The bot detects it, reports `local Bot API server` in the banner, and `/limits`
+explains the ceiling. Note that this route cannot exceed 2000 MB: **only a user session
+reaches 4000 MB.**
 
-```bash
-# Docker: mount the file read-only and point the setting at it
-docker run ... -v "$PWD/cookies.txt:/run/cookies.txt:ro" -e COOKIES_FILE=/run/cookies.txt ytbot
-```
+## Step 5 — What the engine cannot fetch
 
-* Keep the file out of git — `.gitignore` already excludes `cookies.txt` and `*.pem`.
-* The cookies represent your account. A bot used by other people with your cookies is a
-  bad idea; keep `OWNER_USER_ID` set in that case.
-* Cookies expire. When videos start failing with "Sign in to confirm you're not a bot",
-  export them again.
+The TypeTube cluster downloads as an anonymous client, so **private, members-only and
+age-restricted videos are not available**: there is no cookie or login to supply. The bot says
+so plainly when the engine reports it (`That video is unavailable, private or removed.`)
+instead of retrying forever.
 
-A proxy helps when a whole region is blocked:
-
-```bash
--e PROXY=socks5://user:pass@host:1080
-```
-
----
+If you need those videos, run your own pipeline rather than pointing this bot at an account —
+and note that YouTube's terms apply to whatever you build.
 
 ## Step 6 — Keep a free instance awake
 
@@ -270,11 +259,12 @@ docker compose up -d --build      # Render: Manual Deploy → Deploy latest comm
 
 There is no migration step and no database to upgrade.
 
-**Keep yt-dlp fresh.** Sites change constantly; a stale extractor is the most common cause
-of sudden failures.
+**Keep the engine fresh.** The TypeTube CLI is pinned in the Dockerfile; YouTube changes
+constantly, so a newer CLI is usually the fix for sudden extraction failures.
 
 ```bash
-docker compose build --no-cache bot      # rebuilds and reinstalls the newest yt-dlp
+# bump ARG TYPETUBE_VERSION in the Dockerfile (and NODE_VERSION if required), then:
+docker compose up -d --build
 ```
 
 **Change a limit.** Edit the environment variable in the dashboard (or `.env`) and restart.
@@ -284,9 +274,9 @@ docker compose build --no-cache bot      # rebuilds and reinstalls the newest yt
 **Rotate the webhook secret.** Set a new `WEBHOOK_SECRET` and restart; the bot re-registers
 the webhook at startup, so nothing else is needed.
 
-**Move the bot to another host.** Only three things carry state: the environment variables,
-the cookies file and, if you care about the local Bot API server, its
-`telegram-bot-api-data` volume.
+**Move the bot to another host.** Only the environment variables carry state — including the
+session string. If you use the optional local Bot API server, its `telegram-bot-api-data`
+volume travels with it.
 
 ---
 
@@ -297,7 +287,7 @@ the cookies file and, if you care about the local Bot API server, its
 | RAM / CPU | 512 MB / 0.1 vCPU | free Nano tier (small) |
 | Sleep | after ~15 min idle | after ~15 min idle |
 | Cold start | 30–60 s | similar |
-| Upload ceiling | 50 MB (cloud Bot API) | 50 MB unless you add a local API server |
+| Upload ceiling | 50 MB (or 2000 MB with a user session) | 50 MB (or 2000 MB with a user session) |
 | Practical use | 1 job at a time, 360p–720p, short clips | same |
 
 A 512 MB instance handles one 720p job comfortably, and two only if the videos are short.

@@ -16,10 +16,10 @@ from telegram.ext import ContextTypes
 from bot import texts
 from bot.errors import BotError
 from bot.keyboards import quality_keyboard
-from bot.probe import MediaInfo, probe
-from bot.qualities import sort_options
+from bot.qualities import build_options, default_option
 from bot.runtime import Runtime, runtime
-from bot.urls import check_url_safety_async, extract_url
+from bot.typetube import Track, resolve
+from bot.urls import youtube_link
 from bot.utils import human_duration
 from config import Settings
 
@@ -38,19 +38,17 @@ async def on_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     text = (message.text or message.caption or "").strip()
-    url = extract_url(text)
+    url, refusal = youtube_link(text)
 
     if url is None:
         # Only nudge in private chats, and only for something that looks like an
         # attempt at a link — never answer ordinary conversation in groups.
         if chat.type == ChatType.PRIVATE and text and not text.startswith("/"):
-            await message.reply_text(texts.not_supported(text), parse_mode=ParseMode.HTML)
-        return
-
-    allowed, reason = await check_url_safety_async(url, allow_private=runtime(context).settings.allow_private_urls)
-    if not allowed:
-        log.warning("Blocked a link from user %s: %s (%s)", user.id, url[:80], reason)
-        await message.reply_text(texts.blocked_url(reason), parse_mode=ParseMode.HTML)
+            if refusal:
+                log.info("Refused a link from user %s: %s", user.id, refusal)
+                await message.reply_text(texts.not_youtube(refusal), parse_mode=ParseMode.HTML)
+            else:
+                await message.reply_text(texts.not_supported(text), parse_mode=ParseMode.HTML)
         return
 
     rt = runtime(context)
@@ -80,40 +78,47 @@ async def _inspect_and_offer(
     status,
     reply_to: int | None,
 ) -> None:
-    """Read the link's formats and offer the qualities it really has."""
+    """Ask TypeTube what the video offers and show the qualities it really has."""
     try:
-        info: MediaInfo = await asyncio.wait_for(probe(url, settings), timeout=INSPECT_TIMEOUT)
+        track: Track = await asyncio.wait_for(resolve(url, settings), timeout=INSPECT_TIMEOUT)
     except asyncio.TimeoutError:
-        await _safe_edit(status, texts.probe_failed(url, "Reading the link took too long."))
+        await _safe_edit(status, texts.resolve_failed(url, "Reading the video took too long."))
         return
     except BotError as exc:
-        await _safe_edit(status, texts.probe_failed(url, exc.reason))
+        await _safe_edit(status, texts.resolve_failed(url, exc.reason))
         return
     except Exception as exc:
-        log.exception("Unexpected probe failure for %s", url[:80])
-        await _safe_edit(status, texts.probe_failed(url, str(exc)[:200]))
+        log.exception("Unexpected resolve failure for %s", url[:80])
+        await _safe_edit(status, texts.resolve_failed(url, str(exc)[:200]))
         return
 
-    token = rt.probes.put(info, user_id=user_id)
-    options = sort_options(info.options)
+    limit_minutes = settings.max_duration_minutes
+    if limit_minutes and track.duration > limit_minutes * 60:
+        await _safe_edit(status, texts.too_long(track.duration, limit_minutes))
+        return
+
+    options = build_options(track, settings, upload_limit_bytes=settings.upload_limit_bytes)
+    if not options:
+        await _safe_edit(status, texts.no_streams())
+        return
+
+    token = rt.tracks.put(track, user_id=user_id)
+    recommended = default_option(options, settings)
 
     body = texts.choose_quality(
-        info.title,
-        human_duration(info.duration),
+        track.title,
+        human_duration(track.duration),
+        track.author,
         settings.upload_limit_mb,
+        replaces_running=rt.manager.for_user(user_id) is not None,
     )
-    if rt.manager.for_user(user_id) is not None:
-        body = "♻️ <i>Your current download will be cancelled when you pick one.</i>\n\n" + body
-
-    if info.uploader:
-        body = f"📺 {info.uploader[:60]}\n" + body
 
     try:
         await status.edit_text(
             body,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
-            reply_markup=quality_keyboard(options, token),
+            reply_markup=quality_keyboard(options, token, recommended=recommended),
         )
     except Exception as exc:
         log.debug("Could not show the quality keyboard: %s", exc)

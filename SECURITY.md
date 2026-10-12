@@ -37,7 +37,10 @@ Nothing user-specific and nothing permanent:
 * **Secrets** are read from environment variables or a mounted file and are never written to
   disk, never logged, and never included in error messages. `python main.py --print-config`
   is covered by a test asserting the token cannot appear in its output.
-* **Cookies** (`COOKIES_FILE`) are read-only input for yt-dlp and are never copied into a job
+* **The session string** is a full login for the upload account: it lives only in the
+  environment, is never logged, and should be treated like the bot token. Least privilege: use
+  a dedicated account and revoke the session from Telegram's *Devices* screen if it leaks.
+* **Downloaded media** is read-only input for the muxer and is never copied into a job
   directory or sent anywhere.
 
 ## How the bot is hardened
@@ -46,7 +49,7 @@ Nothing user-specific and nothing permanent:
 |---|---|
 | Access | `OWNER_USER_ID` restricts the bot to its owner. Without it, anyone who knows the bot can use it — set it for a personal deployment. |
 | Webhook | `POST /<WEBHOOK_PATH>` requires `X-Telegram-Bot-Api-Secret-Token`, refuses bodies over 2 MB, and queues updates instead of processing them in the request. Without `WEBHOOK_SECRET`, anyone who learns the URL can post fake updates — always set it in production. |
-| SSRF | Links are validated before yt-dlp sees them: `http(s)` only, blocked hostnames, and DNS results checked, so a hostname resolving to `127.0.0.1`, a private range or `169.254.169.254` (cloud metadata) is refused. `ALLOW_PRIVATE_URLS=true` disables this and is meant for local testing only. |
+| Malicious links | Only YouTube links are accepted, and they are canonicalised before the engine sees them, so a link can neither redirect the engine at an internal address nor smuggle a different video in. |
 | Subprocesses | Every child process is spawned with an argument list (no shell), with a timeout and a registry entry, and is killed on cancel or shutdown. User input never reaches a shell. |
 | Container | Runs as non-root (uid 10001) with only `DOWNLOAD_DIR` writable; no port besides `PORT` needs to be published. |
 | Rate limiting | Optional `AIORateLimiter` from python-telegram-bot keeps the bot inside Telegram's limits; uploads honour `RetryAfter`. |
@@ -62,7 +65,7 @@ Nothing user-specific and nothing permanent:
 - [ ] `COOKIES_FILE`, if used, mounted read-only and out of the repository.
 - [ ] `LOG_LEVEL=INFO` (or `WARNING`) in production; `DEBUG` logs more about who sends what.
 - [ ] `/health` reachable by your monitor only, or accept that it is a small public status page.
-- [ ] Update yt-dlp regularly: extractor fixes are security-relevant, since a malicious page
+- [ ] Keep the engine current: bump `TYPETUBE_VERSION` in the Dockerfile when a newer CLI ships.
       is parsed by this process.
 
 ## Out of scope
