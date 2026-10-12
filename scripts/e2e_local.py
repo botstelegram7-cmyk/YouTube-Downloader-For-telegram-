@@ -15,6 +15,10 @@ Exit code 0 means the download → mux → thumbnail → upload pipeline works e
 
     python scripts/e2e_local.py                # uses ffmpeg from PATH
     python scripts/e2e_local.py --ffmpeg /usr/bin/ffmpeg --keep-files
+
+If the script is not run from inside the checkout (as the Docker CI job does, from
+``/opt/scripts``), point it at the code with ``YT_BOT_ROOT=/app`` or run it with the
+checkout as the working directory.
 """
 
 from __future__ import annotations
@@ -33,7 +37,26 @@ from pathlib import Path
 
 from aiohttp import ClientSession, web
 
-ROOT = Path(__file__).resolve().parents[1]
+
+def _find_repo_root() -> Path:
+    """Locate the checkout that contains ``main.py``.
+
+    The harness is normally run from the repository, but it is also run from a
+    read-only mount inside the Docker image (``/opt/scripts``), where its own
+    directory says nothing about where the bot lives. Prefer explicit overrides,
+    then the current directory, then the script's own location.
+    """
+    here = Path(__file__).resolve()
+    override = os.getenv("YT_BOT_ROOT")
+    candidates = [Path(override)] if override else []
+    candidates += [Path.cwd(), *here.parents, here.parent]
+    for candidate in candidates:
+        if (candidate / "main.py").is_file() and (candidate / "config.py").is_file():
+            return candidate
+    return here.parents[1]
+
+
+ROOT = _find_repo_root()
 TOKEN = "123456789:placeholder-token-used-only-by-the-e2e-harness"
 WEBHOOK_SECRET = "e2e-local-secret"
 CHAT_ID = 5550001
@@ -245,12 +268,19 @@ def build_test_video(ffmpeg: str, directory: Path) -> Path:
 # --------------------------------------------------------------------------- #
 # Harness
 # --------------------------------------------------------------------------- #
-async def wait_for(predicate, *, timeout: float, interval: float = 0.4, what: str = "condition"):
+async def wait_for(predicate, *, timeout: float, interval: float = 0.4, what: str = "condition", abort=None):
+    """Poll ``predicate`` until it is truthy.
+
+    ``abort`` short-circuits the wait: it is how a dead bot process ends every
+    remaining stage immediately instead of letting each timeout expire.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = predicate()
         if value:
             return value
+        if abort is not None and abort():
+            raise TimeoutError(f"Timed out waiting for {what} (the bot process is gone)")
         await asyncio.sleep(interval)
     raise TimeoutError(f"Timed out waiting for {what}")
 
@@ -365,7 +395,7 @@ async def run(args: argparse.Namespace) -> int:
         log_path = workdir / "bot.log"
         log_handle = log_path.open("w")
         bot_process = subprocess.Popen(
-            [sys.executable, "main.py"],
+            [sys.executable, str(ROOT / "main.py")],
             cwd=str(ROOT),
             env=env,
             stdout=log_handle,
@@ -374,9 +404,16 @@ async def run(args: argparse.Namespace) -> int:
 
         session = ClientSession()
 
+        def bot_is_gone() -> bool:
+            return bot_process is not None and bot_process.poll() is not None
+
         deadline = time.monotonic() + 60
         health = None
+        early_exit: int | None = None
         while time.monotonic() < deadline:
+            if bot_process.poll() is not None:
+                early_exit = bot_process.returncode
+                break
             try:
                 async with session.get(f"http://127.0.0.1:{args.bot_port}/health") as response:
                     health = await response.json()
@@ -386,7 +423,11 @@ async def run(args: argparse.Namespace) -> int:
                 health = None
             await asyncio.sleep(0.5)
 
-        if not health or not health.get("ok"):
+        if early_exit is not None:
+            failures.append(f"the bot exited with code {early_exit} before serving /health")
+            fail(f"the bot exited with code {early_exit} before serving /health")
+            print(f"    (bot root: {ROOT})")
+        elif not health or not health.get("ok"):
             failures.append("/health never became ready")
             fail("/health never became ready")
         else:
@@ -402,6 +443,7 @@ async def run(args: argparse.Namespace) -> int:
             lambda: [c for c in mock.calls_of("sendMessage") if "Bot online" in str(c["fields"].get("text", ""))],
             timeout=30,
             what="the startup introduction message",
+            abort=bot_is_gone,
         )
         if intro:
             ok("startup introduction delivered to the notify chat")
@@ -421,6 +463,7 @@ async def run(args: argparse.Namespace) -> int:
             ],
             timeout=90,
             what="the quality keyboard",
+            abort=bot_is_gone,
         )
         parsed = json.loads(str(keyboard_calls[-1]["fields"].get("reply_markup")))
         buttons = [button for row in parsed["inline_keyboard"] for button in row]
@@ -439,6 +482,7 @@ async def run(args: argparse.Namespace) -> int:
             lambda: [c for c in mock.calls if c["method"] in ("sendVideo", "sendAudio", "sendDocument")],
             timeout=180,
             what="the uploaded file",
+            abort=bot_is_gone,
         )
         call = delivered[0]
         ok(f"delivered with {call['method']}")

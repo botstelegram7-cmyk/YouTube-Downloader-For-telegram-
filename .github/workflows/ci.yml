@@ -73,6 +73,7 @@ jobs:
           docker run --rm \
             -v "$PWD/scripts:/opt/scripts:ro" \
             -e PYTHONPATH=/app \
+            -e YT_BOT_ROOT=/app \
             ytbot-test python /opt/scripts/e2e_local.py
 
   hygiene:

@@ -331,6 +331,12 @@ must be free** (change them with `--api-port`, `--media-port`, `--bot-port`).
 that is the whole point of the harness. A common local cause is another process already
 listening on a port, or a firewalled loopback.
 
+**The harness says "the bot exited with code N before serving /health".** The bot never
+started: the message names the exit code and the repository root it used. If the root is
+wrong (the harness looks for `main.py` and `config.py` in the working directory and next to
+the script), set it explicitly: `YT_BOT_ROOT=/path/to/checkout python scripts/e2e_local.py`.
+Otherwise the log tail that follows the failure has the bot's own reason.
+
 ---
 
 ## Clean slate
