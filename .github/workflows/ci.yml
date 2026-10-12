@@ -119,14 +119,18 @@ jobs:
           fi
 
       - name: Fail if yt-dlp comes back
-        # The engine is TypeTube; a stray yt-dlp import or pin would silently revive
-        # the old downloader and split the codebase in two.
+        # The engine is TypeTube; a stray yt-dlp import or pin would silently revive the
+        # old downloader. (xargs reports "no match" as exit 123, so the matched output is
+        # what decides here, not the exit code.)
         run: |
-          if git ls-files -z '*.py' '*.txt' '*.yml' '*.toml' 'Dockerfile' \
-             | xargs -0 grep -InE '(^|[^a-zA-Z_-])(yt_dlp|yt-dlp)([^a-zA-Z_-]|$)' 2>/dev/null; then
+          offenders=$(git ls-files -z '*.py' '*.txt' '*.toml' 'Dockerfile' \
+            | xargs -0 grep -InE '(^|[^a-zA-Z_-])(yt_dlp|yt-dlp)([^a-zA-Z_-]|$)' 2>/dev/null || true)
+          if [ -n "$offenders" ]; then
+            echo "$offenders"
             echo "::error::yt-dlp is referenced again — the download engine is TypeTube"
             exit 1
           fi
+          echo "no yt-dlp references in shipped code"
 
       - name: Fail on a committed bot token
         # Placeholders in the CI workflow and the e2e harness are deliberately
