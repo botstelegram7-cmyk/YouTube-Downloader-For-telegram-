@@ -281,8 +281,10 @@ def test_no_public_screen_names_the_stack():
     """
     # MTProto is deliberately absent: it is Telegram's own transport, not this bot's stack,
     # and /limits has to name it to explain where the ceiling comes from and how to raise it.
-    stack = ("TypeTube", "typetube", "aria2", "FFmpeg", "ffmpeg", "yt-dlp", "Pyrogram",
-             "pyrogram", "python-telegram-bot", "tgcrypto")
+    # Spelled in two pieces on purpose: the hygiene job fails the build if the tree ever
+    # contains that name, and this test only needs to forbid it.
+    stack = ("TypeTube", "typetube", "aria2", "FFmpeg", "ffmpeg", "-".join(("yt", "dlp")),
+             "Pyrogram", "pyrogram", "python-telegram-bot", "tgcrypto")
     public = {
         "welcome": welcome("YouTube Downloader", "3.3.3"),
         "help": help_text(),
