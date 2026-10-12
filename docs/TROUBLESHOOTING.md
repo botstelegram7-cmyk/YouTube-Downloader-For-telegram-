@@ -1,224 +1,348 @@
 # Troubleshooting
 
-Start here: the worker's `/health` endpoint answers most questions in one request.
+Symptom → cause → fix, for the things that actually go wrong. Start with the two commands
+that answer most questions at once:
 
 ```bash
-export WORKER_URL="https://your-worker.onrender.com"
-curl -s "$WORKER_URL/health" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.stringify(JSON.parse(s),null,2)))"
+python main.py --check          # config, FFmpeg, disk, versions — prints exactly what it finds
+curl -s https://<your-service>/health | jq
+docker compose logs --tail=100 bot   # or your host's log viewer
 ```
 
-Then check the table below.
+Every log line of a job carries its job id (`Job a1b2c3d4 …`), so `grep a1b2c3d4` prints
+the whole story of one download.
 
 ---
 
-## Bot side (Telegram Serverless)
+## Contents
 
-### The bot does not answer at all
-
-| Check | Command / action |
-|---|---|
-| Are the handlers deployed? | `npx tgcloud status` — should report no local changes |
-| Is the webhook in sync? | `npx tgcloud webhook` |
-| Did an old process steal the updates? | Stop any other bot polling the same token. A `getUpdates` poller and a webhook cannot coexist: one of them silently wins |
-| Did a deploy fail? | `npx tgcloud push` prints the failing module and reason |
-
-### `/start` works but every download says "not connected to a download worker"
-
-The `/setup` step never reached the database.
-
-```text
-/setup https://your-worker.onrender.com YOUR_WORKER_SECRET
-/config
-```
-
-If `/config` shows `Connected: no` afterwards, the secrets are wrong — `/setup` writes
-them unconditionally, so a failure here usually means the message never got through.
-
-### "The worker rejected the shared secret"
-
-* Copy `WORKER_SECRET` from the Render dashboard (**Environment** tab) and run `/setup`
-  again — most cases are a trailing space or a half-copied value.
-* If you rotate the secret on Render, the bot keeps using the old one until `/setup`
-  runs again.
-* Check you did not paste the **bot token** as the secret, or the **Serverless CLI
-  token** (`app<id>:…`) as `BOT_TOKEN` in Render. The worker logs a specific warning
-  for that case at boot.
-
-### "The worker did not answer in time"
-
-Free Render instances sleep after 15 minutes without traffic and need ~50 seconds to
-wake. Options:
-
-1. Send the link again in a minute (it always works on the second attempt).
-2. Set up the keep-alive cron described in
-   [DEPLOYMENT.md → Step 8](DEPLOYMENT.md#step-8--keep-the-free-worker-awake).
-
-### `/quality` saves but downloads ignore it
-
-Quality is sent with each submission, so re-send the link. `/download 480p <link>`
-forces one quality for a single link. If the worker is down, the status message says so
-and nothing is queued.
-
-### "You already have a download running" but nothing is happening
-
-The worker genuinely thinks a job is running (it holds the chat lock), or a job died
-without cleaning up.
-
-1. `/status` — if the worker lists a running job, press **Cancel** on its message or
-   run `/cancel`.
-2. If the worker lists nothing, wait for the cooldown (20 s) and send the link again.
-3. Restarting the Render service clears the worker's in-memory queue.
-
-### "You have reached today's limit"
-
-`MAX_JOBS_PER_DAY` (default 20) is per user per rolling 24 hours. Raise it in
-`tgcloud/lib/config.js` and `npx tgcloud push`.
-
-### Migrate warns about removed tables or columns
-
-The platform only drops things that are explicitly marked with
-`.deprecated('reason')`. Deleting a declaration from `schema.js` leaves the data in
-place; that is intentional and safe.
+- [The bot does not answer](#the-bot-does-not-answer)
+- [The container exits or restarts in a loop](#the-container-exits-or-restarts-in-a-loop)
+- [Health, webhook and polling](#health-webhook-and-polling)
+- [Links are rejected](#links-are-rejected)
+- [Probing fails](#probing-fails)
+- [Downloads fail](#downloads-fail)
+- [Uploads fail or stall](#uploads-fail-or-stall)
+- [The delivered file is wrong](#the-delivered-file-is-wrong)
+- [Cancellation, cleanup and disk](#cancellation-cleanup-and-disk)
+- [Local Bot API server (2 GB mode)](#local-bot-api-server-2-gb-mode)
+- [Local development and tests](#local-development-and-tests)
+- [Clean slate](#clean-slate)
 
 ---
 
-## Worker side (Render)
+## The bot does not answer
 
-### Deploy fails immediately
-
-Read the first `error` line in the log. Typical causes:
-
-| Log line | Cause | Fix |
-|---|---|---|
-| `Invalid worker configuration: BOT_TOKEN is required` | The variable was not set | Render → Environment → add it |
-| `BOT_TOKEN does not look like a BotFather bot token` | The CLI token was pasted | Use the token from @BotFather → **API Token** |
-| `WORKER_SECRET is required` | Missing | Add it (or let `render.yaml` generate it) |
-| `Cannot find module 'typetube'` | `npm ci` ran without the lockfile | Redeploy from this repository; `worker/package-lock.json` is committed |
-
-### `/health` shows `ffmpeg: "missing"`
-
-The container did not install FFmpeg, which means you are not building
-`worker/Dockerfile`. In the Render service check **Runtime: Docker** and **Root
-Directory: worker**. Without FFmpeg the worker still downloads, but it cannot merge
-video+audio, and the caption will say `no audio track`.
-
-### `/health` shows `typeTube.supported: false`
-
-The runtime lacks zlib zstd (Node older than 22.15). Redeploy from this repository,
-which pins Node 24. Details: [TYPETUBE_COMPAT.md](TYPETUBE_COMPAT.md).
-
-### Downloads are slow
-
-* 0.1 vCPU on the free plan is the ceiling; the Starter plan gives 0.5 vCPU.
-* 2160p streams are large; 720p or 480p are much faster and usually fit Telegram.
-* Check the worker log for `TypeTube attempt failed` — a slow yt-dlp fallback is much
-  slower than TypeTube.
-* `DOWNLOAD_WORKERS=6` can help on paid instances; keep 4 on 512 MB.
-
-### "TypeTube could not deliver this video — using the yt-dlp fallback"
-
-The log line above it has the real reason:
-
-| Reason in the log | Meaning |
-|---|---|
-| `Decompression failed` | Node too old — see `/health typeTube.supported` |
-| `[TypeTube Error …]: …` | The cluster refused the track (rate limit, region, unavailable) |
-| `TypeTube resolve timed out` | Cluster slow or blocked from the host's network |
-| Public quota exhausted | 60 resolves/min or 1,500/day per IP; on shared hosts, other tenants may have used it — a private TypeTube key raises it |
-
-### "YouTube refused the download for the worker's region (HTTP 403)"
-
-YouTube restricted the track for the worker's region, which is common for VEVO and
-licensed music. Hosting the worker in **Singapore** (the TypeTube cluster's region)
-works best; Frankfurt/Ohio are decent alternatives, and a private TypeTube key routes
-differently again.
-
-### The file never arrives, but the status message says "Uploading…"
-
-| Cause | Check |
-|---|---|
-| File above the 50 MB bot limit | Telegram's limit, not the worker's (`MAX_UPLOAD_MB=0` by default). The status message explains it and offers retry qualities; a self-hosted bot API server lifts the ceiling to 2 GB |
-| Telegram rejected the codec | The worker falls back to `sendDocument`; look for `Upload attempt failed, trying a simpler form` in the logs |
-| Upload timed out | Slow phone connection or a stalled request; re-try, and prefer a lower quality |
-| Bot token revoked or rotated | `getMe` in the worker log at boot says so explicitly |
-
-### "File is too large" even though MAX_UPLOAD_MB is 0
-
-`MAX_UPLOAD_MB=0` removes the **worker's** limit only. The hosted Bot API rejects bot
-uploads above **50 MB** before the file ever reaches the chat, and it is Telegram doing
-the rejecting:
-
-| What you see | What it means |
-|---|---|
-| `sendVideo`/`sendDocument` fails with `Bad Request: file is too big` | Telegram refused it — the worker logged the exact method |
-| `/health` shows `"maxUploadMb": "unlimited"` | The worker really is unlimited; the limit is upstream |
-| `/config` (owner) shows `telegramApi: hosted` | The hosted Bot API is in use, so 50 MB applies |
-
-Three honest options:
-
-1. **Accept 50 MB and let the worker downgrade** — set `MAX_UPLOAD_MB=50` and
-   `AUTO_DOWNGRADE=true`, and the bot re-downloads smaller instead of failing (the retry
-   buttons do it by hand).
-2. **Ask for a smaller quality up front** — 360p/480p are usually inside 50 MB.
-3. **Self-host the bot API server** — run
-   [telegram-bot-api](https://github.com/tdlib/telegram-bot-api) with an `api_id`/`api_hash`
-   from <https://my.telegram.org>, set `TELEGRAM_API_BASE=http://<host>:8081` and
-   `MAX_UPLOAD_MB=2000`. Uploads then reach 2 GB per file. Budget ~1 GB of RAM for that
-   server, so a free 512 MB instance cannot host both.
-
-### The worker deployed but downloads arrive without sound
-
-The worker could not find FFmpeg, so it delivered the video track on its own:
-
-| Host / runtime | Why | Fix |
-|---|---|---|
-| Voroa, **Node.js buildpack** | The buildpack cannot install system packages, so there is no FFmpeg (and no yt-dlp) | Switch the service to the **Docker (Dockerfile)** runtime — the image installs both |
-| Render, Docker | The image should have FFmpeg | Check `/health` → `"ffmpeg": "…"`; if it says `missing`, redeploy from this repository |
-| Any host, `FFMPEG_BINARY` set | The path does not exist in the container | Unset it, or point it at a real binary |
-
-### The container is killed at random
-
-512 MB is the free-plan ceiling. Reduce `MAX_CONCURRENT_DOWNLOADS` to `1`,
-`DOWNLOAD_WORKERS` to `3`, and `CHUNK_SIZE_MB` to `4`, then redeploy. 2160p is the most
-likely trigger.
-
-### Nothing works and you want a clean slate
+**1. Is the process alive and reachable?**
 
 ```bash
-# Worker
-curl -s "$WORKER_URL/health"                       # is it alive?
-# Render: Manual Deploy → Deploy latest commit      # rebuild the image
-
-# Bot
-npx tgcloud status && npx tgcloud push && npx tgcloud webhook
-# then in Telegram:
-/setup <worker-url> <secret>
+curl -s https://<your-service>/health          # 200 + JSON
 ```
+
+No response → the service is not running (see the next section). A response with
+`"ffmpeg": null` and status **503** → the container is up but FFmpeg is missing.
+
+**2. Is the token right?** `python main.py --online` calls `getMe`. `401 Unauthorized`
+means the token is wrong or revoked; fix `BOT_TOKEN` and restart. `main.py --check` catches
+the shape of a token (a `123:ABC` pattern) but only Telegram can confirm it is live.
+
+**3. Is the bot locked to someone else?** With `OWNER_USER_ID` set, other users are
+ignored by design — they get no answer at all. Send `/id` to check your numeric id.
+
+**4. Polling or webhook?** The startup banner states the mode:
+
+```
+  Mode       : webhook → https://mybot.onrender.com/telegram
+  Mode       : polling
+```
+
+In webhook mode the bot registers the webhook at startup; until that line appears in the
+log, Telegram is not sending anything. In polling mode, look for the opposite problem:
+`Conflict: terminated by other getUpdates request` means **two instances are polling the
+same token**, or a webhook is still registered. One instance only, then:
+
+```bash
+curl -s "https://api.telegram.org/bot<TOKEN>/deleteWebhook?drop_pending_updates=true"
+```
+
+**5. Did the updates ever arrive?** With `LOG_LEVEL=DEBUG` you get one line per update.
+No lines at all → the problem is above the bot (token, webhook, network), not inside it.
 
 ---
 
-## Local development
+## The container exits or restarts in a loop
 
-### Tests fail with `Cannot find package 'sdk'`
+`python main.py` fails fast and loudly on purpose — a misconfigured bot should not pretend
+to run. The reason is the last line before the exit:
 
-The Serverless handlers import a module that only exists inside Telegram's runtime. Run
-them through the stub loader:
+| Log line | Fix |
+|---|---|
+| `ConfigError: BOT_TOKEN is required` | Set `BOT_TOKEN`. |
+| `ConfigError: … port` / `MAX_UPLOAD_MB` out of range | The setting is outside its allowed range; `/health` and the banner print the effective values. |
+| `MissingDependency: FFmpeg was not found …` | Install FFmpeg or point `FFMPEG_BINARY`/`FFPROBE_BINARY` at it. |
+| `CommandError: ffprobe failed: …` at boot | The binary exists but cannot execute (wrong architecture, missing shared library). Test with `ffprobe -version` inside the container. |
+| `Could not write to the download directory` | `DOWNLOAD_DIR` is not writable by the container user (uid 10001). Mount a writable volume or change the path. |
+| Repeated `TelegramError` during startup | The bot cannot reach the API — a blocking firewall, a bad proxy, or (for the local API server) a wrong `TELEGRAM_API_BASE`. |
+
+`python main.py --check` reports all of these before the bot even starts trying to connect.
+
+---
+
+## Health, webhook and polling
+
+**`/health` returns 503.** Read the JSON: it names the failing dependency. The usual case
+is `"ffmpeg": null` — the image has FFmpeg, so this normally means a custom build or a
+`FFMPEG_BINARY` pointing at a path that does not exist. The health endpoint intentionally
+reports this as *unhealthy*: the bot cannot do its job without it.
+
+**"Wrong response from the webhook: 403 Forbidden".** The `X-Telegram-Bot-Api-Secret-Token`
+header did not match `WEBHOOK_SECRET`. Set the same value in the bot and re-register (it
+happens automatically at startup) — or clear `WEBHOOK_SECRET` on both sides. This is also
+what you are protecting against: someone else POSTing fake updates to your endpoint.
+
+**404 on the webhook path.** `WEBHOOK_PATH` (default `telegram`) is the last segment of the
+URL Telegram calls: `https://host/telegram`. If a proxy strips or rewrites the path, the
+bot answers 404 — disable path rewriting for that route, or change `WEBHOOK_PATH`.
+
+**Telegram requires HTTPS.** A webhook URL must be `https://`; in practice this means a
+TLS terminator in front of the container. No public HTTPS? Use polling: leave `WEBHOOK_URL`
+empty or set `USE_POLLING=true`. Polling needs no ingress and behaves identically for the
+user, with a small added latency.
+
+**Updates are rejected with 413.** The bot refuses webhook payloads larger than 2 MB on
+purpose. Telegram never sends anything near that; a 413 means something else is posting to
+the endpoint (a health checker with a huge body, or an attacker). Check the caller, and keep
+`WEBHOOK_SECRET` set.
+
+---
+
+## Links are rejected
+
+**"🚫 That link is not allowed — private address".** The SSRF guard blocked a host that
+resolves to loopback, private (`10.*`, `192.168.*`), link-local (`169.254.*` — the cloud
+metadata address) or otherwise internal range. That guard is deliberate: without it, a
+public bot can be used to make your server fetch its own internal network. It applies to
+the DNS result too, not just the URL text.
+
+**I really do want a local URL** (a LAN media server, or the bundled e2e test): set
+`ALLOW_PRIVATE_URLS=true`. That is a *testing* switch — expect an internal-network attacker
+surface if you leave it on in production.
+
+**"🤔 That does not look like a link".** Only `http(s)` URLs are accepted. Bare words,
+`ftp://`, `file://` and pasted text are refused.
+
+**Playlist links** are refused unless `ALLOW_PLAYLIST=true`, and even then only the first
+item is downloaded — a bot that silently starts 400 downloads is not a feature.
+
+---
+
+## Probing fails
+
+Probing means yt-dlp listing the formats of a link without downloading (45-second limit;
+`INSPECT_TIMEOUT` in `bot/handlers/links.py`). The failure text in chat lists the usual
+causes; in the log, one of these appears:
+
+| Log line | Meaning and fix |
+|---|---|
+| `probe timed out` | The site is slow or throttling. Try again; always-on hosts with a distant region (a US datacentre for an Indian-only site) are the usual culprit. Consider `PROXY`. |
+| `Unsupported URL` | yt-dlp has no extractor for that site. Nothing to fix here — the bot reports "no downloadable formats". |
+| `Sign in to confirm you're not a bot` / `Private video` / `age` | The video needs cookies: set `COOKIES_FILE` (see [DEPLOYMENT step 5](DEPLOYMENT.md#step-5--age-restricted-or-sign-in-only-videos-cookies)). |
+| `HTTP Error 403` | Region/IP block — a proxy is the usual answer. |
+| `No downloadable formats` | It is a live stream, a text page, or a page whose media loads only after login. |
+
+**A stale yt-dlp is the single most common cause of sudden probe failures.** Sites change
+weekly; rebuild the image (`docker compose build --no-cache bot`) or `pip install -U yt-dlp`.
+
+---
+
+## Downloads fail
+
+**"Requested format is not available".** The bot already guards against this: every
+format selector ends in a plain `best` fallback, so a pick can never fail merely because
+the source's metadata was thin (direct media URLs, unusual extractors). If you still see it,
+the source changed between the probe and the download — send the link again.
+
+**The download stops at a random percentage.** Check the log for yt-dlp's own reason:
+`HTTP Error 429` (rate-limited — wait, or set `PROXY`), `Connection reset` (retried
+automatically `YTDLP_RETRIES` times), or `read timed out` (raise
+`YTDLP_SOCKET_TIMEOUT`). The job fails cleanly and its temp files are removed.
+
+**It never finishes.** `DOWNLOAD_TIMEOUT_SECONDS` (default 3600) ends the job with a clear
+message. On a 0.1 vCPU free tier, a long 1080p download can be starved by the rest of the
+system; lower `MAX_CONCURRENT_JOBS` to 1 and prefer smaller qualities.
+
+**Disk full during a download.** Every job has its own `job-<id>-*` directory under
+`DOWNLOAD_DIR`, deleted when the job ends. Free space is reported by `/status` and in the
+startup log. Give the host about twice the size of the largest file you intend to deliver.
+
+---
+
+## Uploads fail or stall
+
+**"That file is too large".** The bot refuses *before* downloading when the estimate
+exceeds the ceiling. Read the message: it names the ceiling and why. The number comes from
+the API in use — **50 MB on the cloud Bot API, 2000 MB with a local Bot API server**
+(`TELEGRAM_API_BASE`). `MAX_UPLOAD_MB` can only lower it; it can never raise what Telegram
+allows. `/limits` explains this to users, and the startup banner prints it for operators.
+
+> A file that fits under the ceiling can still be refused by Telegram itself (for example
+> 50 MB exactly, with multipart overhead). Telegram's error is passed through verbatim.
+
+**The upload stalls at some percentage.** Telegram throttles large uploads; the bot honours
+`RetryAfter` and reports "Telegram asked me to slow down". A stall that never recovers
+usually means a proxy/load balancer cutting long-lived connections — the upload timeout is
+generous (`1.5 s per MB`, minimum 10 minutes) by design. Check the host's request timeout
+settings before blaming the bot.
+
+**`sendVideo` was refused (falling back to `sendDocument`).** This is in the log on
+purpose: Telegram does not consider that file a playable video (an unusual container or
+codec, or a file that is not really a video). The same bytes are delivered as a document so
+the user still gets the file. If it happens for a common format, FFmpeg probably remuxed
+into a container the client does not accept — the file itself is fine.
+
+**`Forbidden: bot was blocked by the user`.** The user blocked the bot mid-job. The job
+stops; nothing to fix.
+
+---
+
+## The delivered file is wrong
+
+**No sound.** The chosen quality was video-only (normal for 1080p+ on many sites) and the
+audio stream could not be muxed. The log says which FFmpeg command failed. Common causes:
+a source whose audio yt-dlp could not fetch (retry, or use cookies), or a full disk during
+muxing. `Video has no audio track` in the log means the *source* had none — that is on the
+source, not the bot.
+
+**No thumbnail.** Thumbnails are generated with FFmpeg from a frame about 20% into the
+video (JPEG, ≤200 kB, longest side ≤ `THUMBNAIL_MAX_SIDE` = 320). If generation fails, the
+file is still delivered and the log explains why — for example a video shorter than the
+seeking point or a codec FFmpeg cannot decode.
+
+**The video does not stream / takes long to start.** MP4 files are remuxed with
+`+faststart` when they are not already faststart (the log reports
+`faststart=True`). Delivered files always have it; if a client still downloads fully first,
+it is the client.
+
+**The caption is cut off.** Captions are capped at 1000 characters (Telegram allows 1024,
+and the bot leaves room for the source link). Long titles are truncated with an ellipsis.
+
+---
+
+## Cancellation, cleanup and disk
+
+**`/cancel` says "Nothing is running for you right now."** The job already finished,
+failed or was auto-cancelled by a newer request. `/status` shows what is actually running.
+
+**A child process survived a cancel.** Every yt-dlp/FFmpeg process is registered in
+`ProcessRegistry`, which sends `SIGTERM`, waits briefly, then `SIGKILL`s whatever is still
+alive. If a process is stuck in uninterruptible I/O (a dead NFS mount, a wedged disk), even
+`SIGKILL` cannot help — restart the container.
+
+**Temp files are accumulating.** Check `CLEANUP_AFTER_UPLOAD` (default `true`) and
+`KEEP_FAILED_FILES` (default `false`). Orphaned directories can also be left by a
+`SIGKILL`ed container: they are safe to delete, since each job works in its own directory
+and only deletes its own:
 
 ```bash
-node --import ./tests/stubs/register.mjs --test tests/     # what `npm test` does
+docker exec -it ytbot sh -c 'ls -la /tmp/ytbot-downloads && rm -rf /tmp/ytbot-downloads/job-*'
 ```
 
-### Worker tests fail with `ERR_INVALID_ARG_TYPE ... promisify`
+**The user's previous job vanished.** That is the feature: one job per user. A new link
+cancels the running one, rewrites its status message to "♻️ Cancelled your previous request
+to start the new one." and deletes its temp directory.
 
-You are on Node older than 22.15. Check:
+**Jobs queue up and nothing seems to run.** `MAX_CONCURRENT_JOBS` (default 2) caps how many
+jobs run at once; the rest wait their turn and the status message says so. On a 512 MB
+instance set it to 1.
+
+---
+
+## Local Bot API server (2 GB mode)
+
+**`/health` and the banner still say 50 MB.** The bot did not detect a local API server:
+check `TELEGRAM_API_BASE`. It must point at the server (for example
+`http://telegram-bot-api:8081`) and must not be `https://api.telegram.org`.
+
+**The bot cannot reach it.** Inside compose, `TELEGRAM_API_BASE` uses the *service name*
+`telegram-bot-api`, not `localhost` — each container has its own loopback. Test from the
+bot container:
 
 ```bash
-node -e "console.log(process.version, typeof require('node:zlib').zstdCompress)"
+docker compose exec bot python -c "import os,urllib.request;print(urllib.request.urlopen('http://telegram-bot-api:8081/bot'+os.environ['BOT_TOKEN']+'/getMe').read().decode()[:120])"
 ```
 
-Use Node 22.15+ / 24 (or `nvm use 24`) before running the worker suite.
+**The server container exits immediately.** `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are
+mandatory — get them from [my.telegram.org](https://my.telegram.org) → *API development
+tools* (a phone-based login, unrelated to the bot token). Without them the official server
+refuses to start. Its logs say so.
 
-### `npm install` warns `EBADENGINE`
+**Uploads still fail at 50 MB even with the local server.** The `--local` flag comes from
+`TELEGRAM_LOCAL=1` in `docker-compose.yml`; without it the server still enforces 50 MB.
 
-Expected on older local Node: `worker/package.json` requires Node ≥ 22.15 for TypeTube.
-Switch Node versions rather than lowering the requirement.
+**A 2000 MB upload dies halfway.** Disk space is the usual cause: the server spools every
+upload to disk before sending it (budget ~2× the file size), and a 512 MB/0.1 vCPU free
+instance is not a realistic host for that workload.
+
+**Ports and domains.** The bot listens on `PORT` (default 8080); the API server listens on
+8081 *inside the compose network* and does not need to be published to the internet. Only
+the bot's webhook port must be reachable from Telegram.
+
+---
+
+## Local development and tests
+
+**`ModuleNotFoundError: No module named 'aiohttp'` (or `telegram`).** Install the
+dependencies, not just the source:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
+The end-to-end harness needs `aiohttp`, which is part of `requirements.txt`.
+
+**pytest skips the FFmpeg tests.** By design: those tests need real FFmpeg/ffprobe and skip
+themselves when neither is on `PATH` (the earlier suites still run):
+
+```
+70 passed                      # everything ran
+63 passed, 7 skipped           # no FFmpeg installed
+```
+
+Point the tests at a build explicitly if you keep one outside `PATH`:
+
+```bash
+export FFMPEG_BINARY=/opt/ffmpeg/ffmpeg
+export FFPROBE_BINARY=/opt/ffmpeg/ffprobe
+pytest -q
+```
+
+**The end-to-end harness fails immediately with "FFmpeg not found".** Pass the path:
+
+```bash
+python scripts/e2e_local.py --ffmpeg /opt/ffmpeg        # directory containing ffmpeg+ffprobe
+python scripts/e2e_local.py --keep-files                # leave the workspace for inspection
+```
+
+It starts its own mock Bot API, a media server and the real bot, so **the ports 8091/8092/8093
+must be free** (change them with `--api-port`, `--media-port`, `--bot-port`).
+
+**The harness times out waiting for the quality keyboard.** Read the bot log it prints —
+that is the whole point of the harness. A common local cause is another process already
+listening on a port, or a firewalled loopback.
+
+---
+
+## Clean slate
+
+```bash
+docker compose down                     # stop everything
+docker compose up -d --build            # rebuild the image and start fresh
+
+# inside the container, only scratch data lives here:
+rm -rf /tmp/ytbot-downloads/job-*
+```
+
+There is no database, no queue file and no state outside `DOWNLOAD_DIR` — restarting the
+bot is always safe. If something is genuinely wedged, delete the service and redeploy it
+with the same environment variables; nothing is lost.

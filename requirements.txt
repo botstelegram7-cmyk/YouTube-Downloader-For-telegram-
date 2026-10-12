@@ -1,0 +1,13 @@
+# Runtime dependencies.
+#
+# python-telegram-bot is pinned to the latest stable line (22.8) and the code is
+# written against that API. The rate-limiter extra keeps the bot inside Telegram's
+# limits (30 messages/second globally, ~1 per second per chat).
+python-telegram-bot[rate-limiter]==22.8
+
+# Media extraction and download. yt-dlp is the engine: it knows 1000+ sites,
+# reads the available formats, and drives FFmpeg for muxing.
+yt-dlp>=2026.8.19
+
+# HTTP server for the webhook + /health endpoint of the Web Service deployment.
+aiohttp>=3.10,<4

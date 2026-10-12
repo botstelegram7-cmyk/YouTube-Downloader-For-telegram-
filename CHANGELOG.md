@@ -1,8 +1,93 @@
 # Changelog
 
 All notable changes to this project. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic
-versioning for the worker's HTTP contract.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
+semantic versioning for its configuration surface and behaviour.
+
+## [3.0.0] — 2026-10-12
+
+**Complete rewrite in Python.** The serverless handler and the separate download worker are
+gone; the bot is now one Python web service (python-telegram-bot 22.8 + yt-dlp + FFmpeg)
+that deploys as an ordinary Docker Web Service.
+
+### Added
+
+* **`config.py`** — the whole configuration surface in one place: a frozen `Settings`
+  dataclass with sensible defaults for every value, range validation with readable errors,
+  derived values (`upload_limit_mb`, `runs_webhook`, `api_mode`) and a startup summary that
+  never prints secrets.
+* **Quality picking from real data.** Links are probed with yt-dlp, and direct media URLs
+  (`.mp4` and friends, where yt-dlp reports no geometry) are inspected with **ffprobe**, so
+  the inline keyboard offers only the heights the source actually has — plus `Best`, an
+  audio-only option, and `Original` for a raw file. Estimates that come from bitrate rather
+  than a reported size are prefixed with `≈`.
+* **Playable delivery.** `sendVideo` with `supports_streaming`, real `duration`/`width`/
+  `height` taken from the downloaded file, an FFmpeg-generated JPEG thumbnail (≤200 kB,
+  ≤320 px), a `+faststart` remux when the container needs it, and a clean HTML caption with
+  the source link. A document is only sent when Telegram refuses the video container.
+* **Request management.** One job per user: a new link cancels the previous job (processes
+  terminated, temp files deleted, old status message rewritten). `/cancel` stops the
+  download, conversion and upload in flight and cleans up after itself.
+* **Progress and status.** A single status message per job, edited at most once per
+  `PROGRESS_INTERVAL` (2 s), carrying a one-tap **❌ Cancel download** button, with separate
+  `⬇️`/`🎛`/`⬆️` phases and a byte-accurate upload bar. The message is deleted when the job
+  is delivered.
+* **Web service.** aiohttp serves `/` (service card), `/health` + `/healthz` (503 when
+  FFmpeg is missing), `/stats` (job snapshot) and `POST /<WEBHOOK_PATH>` — secret-token
+  checked, 2 MB payload cap, immediate 200, update queued. The bot registers its webhook at
+  startup and shuts down gracefully on SIGTERM.
+* **Startup introduction.** A console banner with the effective configuration and a
+  formatted Telegram message (features, limits, command list) sent to
+  `STARTUP_NOTIFY_CHAT_ID`, plus the command menu published via `setMyCommands`.
+* **Large files, honestly.** `MAX_UPLOAD_MB=0` now means "as much as this API allows":
+  50 MB on Telegram's cloud API, **2000 MB** when `TELEGRAM_API_BASE` points at a
+  self-hosted Bot API server. `docker-compose.yml` runs that server (`--local`) next to the
+  bot. The real ceiling is printed at startup, in `/limits`, and enforced *before*
+  downloading.
+* **Tests and CI.** 70 pytest tests (configuration, URL safety, quality selection, jobs,
+  progress, real-media FFmpeg), an end-to-end harness (`scripts/e2e_local.py`) that runs the
+  real bot against a mock Bot API and a real clip and asserts the whole delivery, and a CI
+  workflow with test, Docker-build and hygiene jobs.
+
+### Changed
+
+* **Version 3.0.0**, `python 3.10+` (image: 3.12), dependencies pinned in
+  `requirements.txt` (`python-telegram-bot[rate-limiter]==22.8`, `yt-dlp`, `aiohttp`).
+* **Commands** are now `/start /help /status /cancel /limits /id /about`. The old
+  `/quality`, `/audio`, `/video`, `/download`, `/setup`, `/config`, `/stats` and `/unset`
+  are gone: quality is chosen per download from the buttons, and the environment is the
+  configuration.
+* **Deployment** is a Docker web service: `render.yaml` declares it as a blueprint, the
+  `Dockerfile` builds it, and the health check is HTTP `/health`.
+
+### Removed
+
+* The entire serverless side: `tgcloud/` handlers, `tgcloud.jsonc`, the `@tgcloud/cli`
+  dependency and `package.json`/`package-lock.json` — no serverless runtime, no CLI token,
+  no handler deployment step.
+* The Node.js download worker (`worker/`) and its HTTP API, shared secret and Dockerfile —
+  the bot now does the downloading itself.
+* The TypeTube integration and its fallback path, along with `docs/TYPETUBE_COMPAT.md`.
+* The Node test suite, `node --test` CI jobs and `.node-version`.
+
+### Fixed
+
+* **Format selection can no longer fail on thin metadata.** Every generated selector ends in
+  a plain `best` fallback, so pressing a quality button on a direct link (where yt-dlp
+  reports no heights at all) downloads the file instead of raising "Requested format is not
+  available".
+* **Upload progress is measured, not guessed.** `UploadProgressFile` counts the bytes the
+  HTTP client actually reads from disk (a buffered design previously made the counter jump
+  to 100 % on the first read).
+* **Status messages cannot be overwritten by a race.** `finish()` is idempotent: the first
+  outcome wins, so a cancel arriving after the final edit does not rewrite the result.
+* **The non-Unix signal fallback bound its signal name late** (`lambda` capturing the loop
+  variable), so both handlers reported `SIGINT`; the name is now bound per iteration.
+* **Job cancellation no longer swallows `CancelledError`** through an over-eager
+  `except Exception`, and children are always reaped.
+* **The startup introduction is actually delivered**: `Application.initialize()` does not
+  run `post_init`, so the runner calls `on_startup()` explicitly — verified by the e2e
+  harness, which asserts the message arrives.
 
 ## [2.0.1] — 2026-10-12
 

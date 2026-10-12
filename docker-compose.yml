@@ -1,0 +1,57 @@
+# Run the bot together with a local Telegram Bot API server.
+#
+# Why you would use this file: through the cloud Bot API (api.telegram.org) a bot
+# may upload at most 50 MB per file — that is Telegram's limit and no setting in
+# this repository can lift it. A local Bot API server started with --local raises
+# the ceiling to 2000 MB, and this compose file wires the two containers together.
+#
+#   1. Create .env next to this file with BOT_TOKEN, TELEGRAM_API_ID and
+#      TELEGRAM_API_HASH (see .env.example). WEBHOOK_URL is optional.
+#   2. docker compose up -d --build
+#
+# Disk: the API server spools every upload to disk before sending it, so give the
+# host room for roughly twice the largest file you intend to send.
+
+services:
+  telegram-bot-api:
+    # Community image of Telegram's official server (tdlib/telegram-bot-api).
+    image: aiogram/telegram-bot-api:latest
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?set TELEGRAM_API_ID from https://my.telegram.org}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?set TELEGRAM_API_HASH from https://my.telegram.org}
+      # 1 = run with --local, which is what lifts the 50 MB upload limit.
+      TELEGRAM_LOCAL: "1"
+    volumes:
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
+
+  bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - telegram-bot-api
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN:?set BOT_TOKEN from @BotFather}
+      # Every Bot API call goes to the local server instead of api.telegram.org.
+      # This is what makes 2000 MB uploads possible.
+      TELEGRAM_API_BASE: http://telegram-bot-api:8081
+      # Public https address of this service, so Telegram can deliver updates.
+      # Leave it empty on a laptop: the bot detects that and uses long polling,
+      # which needs no inbound connection at all.
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2000}
+      MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-2}
+      STARTUP_NOTIFY_CHAT_ID: ${STARTUP_NOTIFY_CHAT_ID:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DOWNLOAD_DIR: /tmp/ytbot-downloads
+    ports:
+      - "8080:8080"
+    volumes:
+      # Optional: keep downloads on a host volume for inspection. The bot deletes
+      # each file right after uploading unless CLEANUP_AFTER_UPLOAD=false.
+      - bot-downloads:/tmp/ytbot-downloads
+
+volumes:
+  telegram-bot-api-data:
+  bot-downloads:

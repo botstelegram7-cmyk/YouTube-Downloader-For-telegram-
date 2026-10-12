@@ -1,36 +1,57 @@
-# Telegram Serverless CLI state — holds the CLI access token, never commit it
-.tgcloud/
-
-# Secrets
+# --- Secrets and machine-local configuration ---------------------------------
 .env
 .env.*
 !.env.example
-worker/.env
 *.pem
 *.key
 credentials.json
+# Netscape-format cookies exported from a browser
+cookies.txt
+cookies*.txt
+*.cookies
 
-# Dependencies
-node_modules/
-worker/node_modules/
-npm-debug.log*
-npm-debug.log*
-
-# Downloaded media and runtime leftovers
-downloads/
-worker/downloads/
-*.part
-*.tmp
-*.log
-
-# Python leftovers from the removed polling bot (kept out to avoid re-adding them)
+# --- Python -------------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
 .venv/
 venv/
+env/
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
 
-# Editors and OS
-.DS_Store
-Thumbs.db
+# --- Test and lint caches -----------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit-*.xml
+.cache/
+
+# --- Editor and OS clutter ----------------------------------------------------
 .idea/
 .vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- Runtime leftovers --------------------------------------------------------
+# The bot works in DOWNLOAD_DIR (default /tmp/ytbot-downloads) and cleans up after
+# each job; these cover a local run that was killed mid-download.
+downloads/
+job-*/
+*.part
+*.ytdl
+*.tmp
+*.log
+!docs/**/*.log
+
+# --- Docker / deploy scratch --------------------------------------------------
+docker-compose.override.yml

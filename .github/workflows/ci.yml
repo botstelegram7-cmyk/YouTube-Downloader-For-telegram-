@@ -15,91 +15,65 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  serverless:
-    name: Serverless modules and tests
+  test:
+    name: Lint, unit tests and end-to-end
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: '24'
-          cache: npm
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+          pip install -r requirements-dev.txt ruff
 
-      - name: Validate the Serverless project layout
-        run: npm run check:modules
+      - name: Lint
+        run: ruff check .
 
-      - name: Syntax check the deployable modules
-        run: npm run check:syntax
+      - name: Static check (imports and syntax)
+        run: python -m compileall -q config.py main.py bot
 
-      - name: Run handler, URL and worker-client tests
-        run: npm test
+      - name: Unit tests
+        run: pytest -q
 
-  worker:
-    name: Download worker
+      - name: Configuration pre-flight
+        env:
+          BOT_TOKEN: '123456789:placeholder-token-used-only-by-ci'
+          WEBHOOK_URL: 'https://example.invalid'
+          MAX_UPLOAD_MB: '50'
+        run: python main.py --check
+
+      - name: End-to-end pipeline (mock Bot API, real yt-dlp + FFmpeg)
+        run: python scripts/e2e_local.py
+
+  docker:
+    name: Docker image
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: worker
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: worker/package-lock.json
+      - name: Build the image
+        run: docker build -t ytbot-test .
 
-      - name: Install dependencies
-        run: npm ci --no-audit --no-fund
-
-      - name: Syntax and hygiene checks
-        run: npm run lint
-
-      - name: Run unit tests
-        run: npm test
-
-      - name: Verify the container image builds
-        run: docker build -t worker-test .
-
-      - name: Verify the root Dockerfile builds (hosts that build the repository root)
-        working-directory: ${{ github.workspace }}
-        run: docker build -t worker-root-test .
-
-      - name: Smoke-test the root image too
-        working-directory: ${{ github.workspace }}
+      - name: Validate the image (config, FFmpeg, yt-dlp)
         run: |
-          docker run --rm -d --name worker-root-ci -p 3000:3000 \
-            -e PORT=3000 \
-            -e BOT_TOKEN=123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
-            -e WORKER_SECRET=ci-only-secret-value-0123456789abcdef \
-            worker-root-test
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:3000/health > /tmp/root-health.json; then break; fi
-            sleep 2
-          done
-          cat /tmp/root-health.json
-          grep -q '"ok":true' /tmp/root-health.json
-          docker stop worker-root-ci
+          docker run --rm \
+            -e BOT_TOKEN=123456789:placeholder-token-used-only-by-ci \
+            -e WEBHOOK_URL=https://example.invalid \
+            -e MAX_UPLOAD_MB=50 \
+            ytbot-test python main.py --check
 
-      - name: Smoke-test the container (config validation, health endpoint)
+      - name: End-to-end check inside the image (FFmpeg, yt-dlp, webhook, /health)
         run: |
-          docker run --rm -d --name worker-ci -p 8080:8080 \
-            -e BOT_TOKEN=123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
-            -e WORKER_SECRET=ci-only-secret-value-0123456789abcdef \
-            -e LOG_PRETTY=true \
-            worker-test
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8080/health > /tmp/health.json; then break; fi
-            sleep 2
-          done
-          cat /tmp/health.json
-          grep -q '"ok":true' /tmp/health.json
-          curl -fsS http://127.0.0.1:8080/health | grep -q 'typeTube'
-          docker stop worker-ci
+          docker run --rm \
+            -v "$PWD/scripts:/opt/scripts:ro" \
+            -e PYTHONPATH=/app \
+            ytbot-test python /opt/scripts/e2e_local.py
 
   hygiene:
     name: Repository hygiene
@@ -107,19 +81,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fail on whitespace errors
-        run: git diff --check HEAD~1 HEAD || git diff --check
+      - name: Fail on whitespace errors anywhere in the tree
+        # Diffing against the empty tree works in a shallow clone and checks the
+        # whole repository, not just the last commit.
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
 
       - name: Fail if a secret-looking file is tracked
         run: |
-          if git ls-files | grep -E '\.(env|pem|key)$|credentials$'; then
+          if git ls-files | grep -E '(^|/)\.env$|\.pem$|\.key$|cookies\.txt$|(^|/)\.venv/'; then
             echo "::error::A secret-looking file is tracked in git"
             exit 1
           fi
 
-      - name: Fail if .tgcloud state is tracked
+      - name: Fail if generated files are tracked
         run: |
-          if git ls-files | grep -q '^\.tgcloud/'; then
-            echo "::error::.tgcloud/ holds the CLI access token and must never be committed"
+          if git ls-files | grep -E '(^|/)__pycache__/|\.pyc$|(^|/)downloads/|\.pytest_cache/'; then
+            echo "::error::Generated files are tracked in git"
+            exit 1
+          fi
+
+      - name: Fail if the serverless or Node side comes back
+        # 3.0.0 removed the Serverless handlers and the Node worker on purpose;
+        # a stray package.json or tgcloud/ directory would resurrect that design.
+        run: |
+          if git ls-files | grep -E '(^|/)tgcloud/|(^|/)worker/|(^|/)node_modules/|(^|/)package(-lock)?\.json$|\.mjs$|tgcloud\.jsonc$|\.node-version$'; then
+            echo "::error::Serverless/Node artifacts are back in the repository"
+            exit 1
+          fi
+
+      - name: Fail on a committed bot token
+        # Placeholders in the CI workflow and the e2e harness are deliberately
+        # shaped like `123456789:placeholder-token-...` so they cannot match.
+        run: |
+          files=$(git ls-files || true)
+          if [ -n "$files" ] && echo "$files" | xargs grep -InE '[0-9]{8,10}:AA[A-Za-z0-9_-]{33}' 2>/dev/null; then
+            echo "::error::A bot-token-shaped string is committed"
             exit 1
           fi

@@ -1,53 +1,50 @@
-# Download worker image, built from the repository root.
+# YouTube Downloader bot — Python 3.12 + FFmpeg + yt-dlp.
 #
-# Why this file exists next to worker/Dockerfile: some platforms build the repository
-# root and look for /Dockerfile, with no way to point at a subdirectory (Voroa's
-# "Docker (Dockerfile)" runtime, for example, takes a path but defaults to /Dockerfile).
-# This image is the same service as worker/Dockerfile — it just installs the worker from
-# a root-level build context.
-#
-# Node 24 is deliberate: TypeTube needs zlib zstd (Node >= 22.15 / >= 23.8) to read its
-# cluster's compressed TAP frames. FFmpeg merges video+audio and normalises audio to M4A;
-# yt-dlp is the fallback engine. See docs/TYPETUBE_COMPAT.md.
-FROM node:24-bookworm-slim
+# Works on any Web Service that builds a Dockerfile: Render, Voroa, Fly.io, a VPS.
+# The bot serves its webhook and /health endpoint on $PORT.
+FROM python:3.12-slim-bookworm
 
-ENV NODE_ENV=production \
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONUNBUFFERED=1 \
-    YTDLP_BINARY=yt-dlp
+    DOWNLOAD_DIR=/tmp/ytbot-downloads
 
-# ffmpeg + ca-certificates for muxing and TLS; python3/pip only to install yt-dlp.
+# ffmpeg/ffprobe mux and inspect media; curl is used by the container health check.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
+      curl \
       ffmpeg \
-      python3 \
-      python3-pip \
- && rm -rf /var/lib/apt/lists/* \
- && pip3 install --break-system-packages --no-cache-dir yt-dlp \
- && npm cache clean --force
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Dependencies first so code changes do not invalidate the npm layer. `npm ci` keeps the
-# build reproducible from the committed lockfile.
-COPY worker/package.json worker/package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund
+# Dependencies first: a code change then does not reinstall them.
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY worker/src ./src
+# yt-dlp is installed twice on purpose: as the Python package (used in-process)
+# and as a standalone binary, so operators always have a working CLI to debug with.
+RUN pip install --no-cache-dir --upgrade yt-dlp \
+ && cp "$(command -v yt-dlp)" /usr/local/bin/yt-dlp \
+ && yt-dlp --version
 
-# The platform injects PORT (Voroa always passes 3000); 8080 keeps `docker run` useful
-# locally. The worker reads it from the environment either way.
+COPY config.py main.py ./
+COPY bot ./bot
+
+# Run as a non-root user; the download directory is the only writable path needed.
+RUN useradd --create-home --uid 10001 botuser \
+ && mkdir -p "$DOWNLOAD_DIR" \
+ && chown -R botuser:botuser /app "$DOWNLOAD_DIR"
+USER botuser
+
 ENV PORT=8080
 EXPOSE 8080
 
-# Run unprivileged. The image's node user owns nothing in /app, and the worker only
-# writes to the system temp dir.
-USER node
-
-# Voroa and Render both use a declared HEALTHCHECK to decide whether a new deploy is
-# ready, so this is what makes a bad build fail instead of serving errors.
+# Both Render and Voroa use a declared HEALTHCHECK (or the health path) to decide
+# whether a deploy is ready, so a broken build fails here instead of going live.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null || exit 1
 
-CMD ["node", "src/index.js"]
+CMD ["python", "main.py"]
